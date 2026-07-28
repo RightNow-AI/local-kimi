@@ -12,13 +12,35 @@ or production-qualified Kimi K3 serving engine.
 
 ## Current evidence boundary
 
+What is measured:
+
+- The Kimi-Linear INT4 artifact exists and was built on an H100 from the real
+  BF16 checkpoint. 98,245,528,576 bytes of source tensors become
+  28,803,304,448, a 3.41x reduction in weight bytes. Planned and actual byte
+  totals agree exactly. See `engine/quant/QUANTIZATION-RESULTS.md`.
+- Stock vLLM 0.26.0 will not serve this model below BF16. On one H200, the
+  as-shipped checkpoint loads and generates, while the bitsandbytes 4-bit path
+  is refused at load with `Model KimiLinearForCausalLM does not support
+  BitsAndBytes quantization yet. No 'packed_modules_mapping' found.` This tests
+  bitsandbytes, the only 4-bit path needing no pre-built artifact; AWQ, GPTQ and
+  compressed-tensors all require a 4-bit checkpoint that does not exist publicly
+  for this model.
+- Routing-aware batch composition has now been simulated at 256 rounds. Its best
+  case is a 1.72 percent union reduction and 1.48 percent modelled throughput,
+  costing up to 39 rounds of deferral and 64.8 seconds of worst-case wait. It is
+  recorded as a negative result. It remains a simulation, not a measurement on
+  real router traces.
+
+What is not measured:
+
 - There is no measured full-model Kimi K3 throughput result in this repository.
-- There is no measured comparison with vLLM or any other serving engine.
-- The Kimi-Linear benchmark report is currently marked `UNMEASURED`.
+- There is no measured speed comparison with vLLM or any other serving engine.
+  The footprint statement above is about bytes, not about speed.
+- There is no measured quality result for the INT4 artifact yet. Weight-space
+  error is not model quality. `engine/accuracy/` exists to settle it.
 - Laptop throughput values are projections from a bandwidth model, not laptop
   measurements.
-- Routing-aware batch composition has an implementation, but the checked-in
-  result file says its simulation was not executed and claims no win.
+- The residency frontier is derived from source, not measured on a device.
 
 The source of each statement is linked below. A projection or model output is
 not presented as a measurement.

@@ -27,10 +27,19 @@ SOURCE_MOUNT = "/weights"
 ACCURACY_MOUNT = "/accuracy"
 SOURCE_MODEL = f"{SOURCE_MOUNT}/Kimi-Linear-48B-A3B-Instruct"
 
+# The official vLLM image already carries a correctly built vLLM and the CUDA
+# toolchain this model needs at run time, so it is the right base. It ships
+# python3 but no `python` on PATH, and Modal's pip_install shells out to
+# `python -m pip`, which fails the build with "python: not found". Installing
+# through python3 explicitly keeps the image's own interpreter, which is the one
+# vLLM is installed into. Do not swap this for add_python: that would add a
+# second interpreter without vLLM in it.
 IMAGE = (
     modal.Image.from_registry("vllm/vllm-openai:v0.26.0")
     .entrypoint([])
-    .pip_install("safetensors>=0.5,<1", "numpy>=2,<3")
+    .run_commands(
+        "python3 -m pip install --no-cache-dir 'safetensors>=0.5,<1' 'numpy>=2,<3'"
+    )
     .env({"VLLM_USE_V1": "1"})
     .add_local_dir(Path(__file__).parent, remote_path="/root/engine")
 )
