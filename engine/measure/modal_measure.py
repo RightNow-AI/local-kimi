@@ -40,21 +40,42 @@ from engine.measure.runtime import (
 APP = modal.App("kimi-linear-both-sides-measure")
 
 IMAGE_REQUIREMENTS = (
-    "vllm>=0.10,<1",
+    # vllm is PINNED, not ranged. Left as a range next to other pins, pip has
+    # already resolved this project down to 0.19.1, which predates
+    # KimiLinearForCausalLM support. A measurement taken against a version that
+    # cannot serve the model is worse than no measurement.
+    "vllm==0.26.0",
     "torch>=2.5",
     "transformers>=4.56",
     "huggingface_hub>=0.34",
     "httpx>=0.27",
     "nvidia-ml-py>=12.0",
+    "numpy>=2.0",
     "safetensors>=0.4",
     "fla-core",
     "einops>=0.8",
 )
 
+# A CUDA devel base, not debian_slim. On debian_slim this model loads all 20
+# shards and then dies at engine core init with "Could not find nvcc and
+# default cuda_home='/usr/local/cuda' doesn't exist", because Kimi-Linear's KDA
+# path JIT-compiles kernels at startup and needs a toolchain present at RUN
+# time. That failure has already cost this project one H200 run, and it happens
+# only AFTER a multi-minute checkpoint load, so it is expensive every time.
 IMAGE = (
-    modal.Image.debian_slim(python_version="3.12")
+    modal.Image.from_registry(
+        "nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.12"
+    )
+    .entrypoint([])
+    .apt_install("git")
     .pip_install(*IMAGE_REQUIREMENTS)
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1", "VLLM_USE_V1": "1"})
+    .env(
+        {
+            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            "VLLM_USE_V1": "1",
+            "CUDA_HOME": "/usr/local/cuda",
+        }
+    )
     .add_local_dir("engine", remote_path="/root/engine")
 )
 
