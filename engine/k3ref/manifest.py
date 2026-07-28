@@ -21,30 +21,10 @@ class TensorSpec:
     dtype: str
 
 
-# Exact non-expert checkpoint tensors for one KDA MoE decoder layer.
+# Exact layer-12 non-expert checkpoint tensors, in safetensors-header order.
 K3_LAYER_TENSOR_MANIFEST: dict[str, TensorSpec] = {
-    "self_attn.q_proj.weight": TensorSpec((12288, 7168), BF16),
-    "self_attn.k_proj.weight": TensorSpec((12288, 7168), BF16),
-    "self_attn.v_proj.weight": TensorSpec((12288, 7168), BF16),
-    "self_attn.g_proj.weight": TensorSpec((12288, 7168), BF16),
-    "self_attn.o_proj.weight": TensorSpec((7168, 12288), BF16),
-    "self_attn.b_proj.weight": TensorSpec((96, 7168), BF16),
-    "self_attn.f_a_proj.weight": TensorSpec((128, 7168), BF16),
-    "self_attn.f_b_proj.weight": TensorSpec((12288, 128), BF16),
-    "self_attn.A_log": TensorSpec((128,), F32),
-    "self_attn.dt_bias": TensorSpec((12288,), F32),
-    "self_attn.q_conv1d.weight": TensorSpec((12288, 1, 4), F32),
-    "self_attn.k_conv1d.weight": TensorSpec((12288, 1, 4), F32),
-    "self_attn.v_conv1d.weight": TensorSpec((12288, 1, 4), F32),
-    "self_attn.o_norm.weight": TensorSpec((128,), BF16),
-    "input_layernorm.weight": TensorSpec((7168,), BF16),
-    "post_attention_layernorm.weight": TensorSpec((7168,), BF16),
-    "self_attention_res_proj.weight": TensorSpec((1, 7168), BF16),
-    "mlp_res_proj.weight": TensorSpec((1, 7168), BF16),
-    "self_attention_res_norm.weight": TensorSpec((7168,), BF16),
-    "mlp_res_norm.weight": TensorSpec((7168,), BF16),
+    "block_sparse_moe.gate.e_score_correction_bias": TensorSpec((896,), F32),
     "block_sparse_moe.gate.weight": TensorSpec((896, 7168), BF16),
-    "block_sparse_moe.gate.e_score_correction_bias": TensorSpec((896,), BF16),
     "block_sparse_moe.routed_expert_down_proj.weight": TensorSpec(
         (3584, 7168), BF16
     ),
@@ -52,15 +32,35 @@ K3_LAYER_TENSOR_MANIFEST: dict[str, TensorSpec] = {
     "block_sparse_moe.routed_expert_up_proj.weight": TensorSpec(
         (7168, 3584), BF16
     ),
+    "block_sparse_moe.shared_experts.down_proj.weight": TensorSpec(
+        (7168, 6144), BF16
+    ),
     "block_sparse_moe.shared_experts.gate_proj.weight": TensorSpec(
         (6144, 7168), BF16
     ),
     "block_sparse_moe.shared_experts.up_proj.weight": TensorSpec(
         (6144, 7168), BF16
     ),
-    "block_sparse_moe.shared_experts.down_proj.weight": TensorSpec(
-        (7168, 6144), BF16
-    ),
+    "input_layernorm.weight": TensorSpec((7168,), BF16),
+    "mlp_res_norm.weight": TensorSpec((7168,), BF16),
+    "mlp_res_proj.weight": TensorSpec((1, 7168), BF16),
+    "post_attention_layernorm.weight": TensorSpec((7168,), BF16),
+    "self_attention_res_norm.weight": TensorSpec((7168,), BF16),
+    "self_attention_res_proj.weight": TensorSpec((1, 7168), BF16),
+    "self_attn.A_log": TensorSpec((128,), F32),
+    "self_attn.b_proj.weight": TensorSpec((96, 7168), BF16),
+    "self_attn.dt_bias": TensorSpec((12288,), F32),
+    "self_attn.f_a_proj.weight": TensorSpec((128, 7168), BF16),
+    "self_attn.f_b_proj.weight": TensorSpec((12288, 128), BF16),
+    "self_attn.g_proj.weight": TensorSpec((12288, 7168), BF16),
+    "self_attn.k_conv1d.weight": TensorSpec((12288, 1, 4), F32),
+    "self_attn.k_proj.weight": TensorSpec((12288, 7168), BF16),
+    "self_attn.o_norm.weight": TensorSpec((128,), F32),
+    "self_attn.o_proj.weight": TensorSpec((7168, 12288), BF16),
+    "self_attn.q_conv1d.weight": TensorSpec((12288, 1, 4), F32),
+    "self_attn.q_proj.weight": TensorSpec((12288, 7168), BF16),
+    "self_attn.v_conv1d.weight": TensorSpec((12288, 1, 4), F32),
+    "self_attn.v_proj.weight": TensorSpec((12288, 7168), BF16),
 }
 
 

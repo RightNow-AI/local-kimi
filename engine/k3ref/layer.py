@@ -248,6 +248,7 @@ class K3ReferenceLayer(nn.Module):
         dtype: torch.dtype,
     ) -> None:
         prefix = f"layers.{self.layer_idx}."
+        loaded_manifest_names: set[str] = set()
 
         def load_parameter(
             module: nn.Module,
@@ -255,9 +256,13 @@ class K3ReferenceLayer(nn.Module):
             suffix: str,
             cast: torch.dtype | None = dtype,
         ) -> None:
+            if self.is_kda and suffix not in K3_LAYER_TENSOR_MANIFEST:
+                raise KeyError(f"KDA tensor is absent from the layer-12 manifest: {suffix}")
             checkpoint_spec = K3_LAYER_TENSOR_MANIFEST.get(suffix)
             if checkpoint_spec is not None:
                 store.validate(prefix + suffix, checkpoint_spec)
+                if self.is_kda:
+                    loaded_manifest_names.add(suffix)
             tensor = store.load(prefix + suffix, device=device, dtype=cast)
             _replace_parameter(module, parameter, tensor)
 
@@ -281,6 +286,7 @@ class K3ReferenceLayer(nn.Module):
                 self.self_attn.o_norm,
                 "weight",
                 "self_attn.o_norm.weight",
+                cast=None,
             )
         else:
             for name in (
@@ -311,6 +317,7 @@ class K3ReferenceLayer(nn.Module):
             moe.gate,
             "e_score_correction_bias",
             "block_sparse_moe.gate.e_score_correction_bias",
+            cast=None,
         )
         load_parameter(
             moe.routed_expert_down_proj,
@@ -362,3 +369,13 @@ class K3ReferenceLayer(nn.Module):
                 "weight",
                 "mlp_res_proj.weight",
             )
+
+        if self.is_kda:
+            expected_manifest_names = set(K3_LAYER_TENSOR_MANIFEST)
+            if loaded_manifest_names != expected_manifest_names:
+                missing = sorted(expected_manifest_names - loaded_manifest_names)
+                unexpected = sorted(loaded_manifest_names - expected_manifest_names)
+                raise ValueError(
+                    "KDA layer loader and checkpoint manifest disagree: "
+                    f"missing={missing}, unexpected={unexpected}"
+                )

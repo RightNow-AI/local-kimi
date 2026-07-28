@@ -37,7 +37,7 @@ class K3Router(nn.Module):
             torch.empty(num_experts, hidden_size, device=device, dtype=dtype)
         )
         self.e_score_correction_bias = nn.Parameter(
-            torch.empty(num_experts, device=device, dtype=dtype)
+            torch.empty(num_experts, device=device, dtype=torch.float32)
         )
         nn.init.kaiming_uniform_(self.weight, a=5**0.5)
         nn.init.zeros_(self.e_score_correction_bias)

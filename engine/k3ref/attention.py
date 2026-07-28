@@ -123,7 +123,7 @@ class KDAAttention(nn.Module):
         self.b_proj = nn.Linear(hidden_size, num_heads, bias=False, **factory)
         self.g_proj = nn.Linear(hidden_size, projection_size, bias=False, **factory)
         self.o_norm = RMSGatedNorm(
-            head_dim, eps=rms_norm_eps, device=device, dtype=dtype
+            head_dim, eps=rms_norm_eps, device=device, dtype=torch.float32
         )
         self.o_proj = nn.Linear(projection_size, hidden_size, bias=False, **factory)
 
