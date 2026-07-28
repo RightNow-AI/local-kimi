@@ -44,7 +44,6 @@ import random
 from dataclasses import asdict, dataclass
 from typing import Iterable, Sequence
 
-
 DEFAULT_CONCURRENCIES = (1, 2, 4, 8, 16, 32, 64, 128)
 DEFAULT_DENSE_PARAMETERS = 57_222_000_000
 DEFAULT_DENSE_BYTES = DEFAULT_DENSE_PARAMETERS * 2

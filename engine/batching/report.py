@@ -12,9 +12,9 @@ from typing import Iterable
 try:
     from engine.batching.union_model import (
         DEFAULT_CONCURRENCIES,
-        DEFAULT_DEQUANT_MODES,
         DEFAULT_DENSE_BYTES,
         DEFAULT_DENSE_PARAMETERS,
+        DEFAULT_DEQUANT_MODES,
         EXPERT_GEMM_TENSOR_BYTES,
         FUSED_DEQUANT,
         MEASURED_DEQUANT_SECONDS_PER_TENSOR,
@@ -37,9 +37,9 @@ try:
 except ModuleNotFoundError:  # Direct execution as engine/batching/report.py.
     from union_model import (
         DEFAULT_CONCURRENCIES,
-        DEFAULT_DEQUANT_MODES,
         DEFAULT_DENSE_BYTES,
         DEFAULT_DENSE_PARAMETERS,
+        DEFAULT_DEQUANT_MODES,
         EXPERT_GEMM_TENSOR_BYTES,
         FUSED_DEQUANT,
         MEASURED_DEQUANT_SECONDS_PER_TENSOR,
