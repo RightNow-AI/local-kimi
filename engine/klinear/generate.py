@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from dataclasses import dataclass
 
 import torch
@@ -14,6 +15,12 @@ from .state import KLinearDecodeState
 class KLinearGenerationOutput:
     token_ids: torch.Tensor
     generated_ids: torch.Tensor
+    state: KLinearDecodeState
+    final_logits: torch.Tensor
+
+
+@dataclass
+class KLinearGenerationTail:
     state: KLinearDecodeState
     final_logits: torch.Tensor
 
@@ -77,6 +84,39 @@ def decode(
     return model(token_ids, attention_mask=attention_mask, state=state)
 
 
+def generate_tokens(
+    model: KLinearModel,
+    prompt_tokens: torch.Tensor,
+    max_new_tokens: int,
+    *,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    attention_mask: torch.Tensor | None = None,
+    generator: torch.Generator | None = None,
+) -> Generator[torch.Tensor, None, KLinearGenerationTail]:
+    """Yield each sampled token before computing the following decode step.
+
+    Closing this generator while it is suspended at a yield releases the
+    request-local decode state without doing another model forward. The batch
+    ``generate`` entry point below drains this same path to preserve its
+    existing result and final-state behavior.
+    """
+
+    if max_new_tokens < 0:
+        raise ValueError("max_new_tokens cannot be negative")
+    output = prefill(model, prompt_tokens, attention_mask=attention_mask)
+    for _ in range(max_new_tokens):
+        next_token = sample_logits(
+            output.logits[:, -1],
+            temperature=temperature,
+            top_p=top_p,
+            generator=generator,
+        )
+        yield next_token
+        output = decode(model, next_token.unsqueeze(1), output.state)
+    return KLinearGenerationTail(output.state, output.logits)
+
+
 @torch.inference_mode()
 def generate(
     model: KLinearModel,
@@ -88,19 +128,22 @@ def generate(
     attention_mask: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
 ) -> KLinearGenerationOutput:
-    if max_new_tokens < 0:
-        raise ValueError("max_new_tokens cannot be negative")
-    output = prefill(model, prompt_tokens, attention_mask=attention_mask)
+    stream = generate_tokens(
+        model,
+        prompt_tokens,
+        max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        attention_mask=attention_mask,
+        generator=generator,
+    )
     generated: list[torch.Tensor] = []
-    for _ in range(max_new_tokens):
-        next_token = sample_logits(
-            output.logits[:, -1],
-            temperature=temperature,
-            top_p=top_p,
-            generator=generator,
-        )
-        generated.append(next_token)
-        output = decode(model, next_token.unsqueeze(1), output.state)
+    while True:
+        try:
+            generated.append(next(stream))
+        except StopIteration as stopped:
+            tail = stopped.value
+            break
     if generated:
         generated_ids = torch.stack(generated, dim=1)
         token_ids = torch.cat((prompt_tokens, generated_ids), dim=1)
@@ -108,6 +151,6 @@ def generate(
         generated_ids = prompt_tokens.new_empty(prompt_tokens.shape[0], 0)
         token_ids = prompt_tokens
     return KLinearGenerationOutput(
-        token_ids, generated_ids, output.state, output.logits
+        token_ids, generated_ids, tail.state, tail.final_logits
     )
 
