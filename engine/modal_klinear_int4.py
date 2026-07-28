@@ -28,6 +28,11 @@ IMAGE = (
         "safetensors>=0.4.5",
         "transformers>=4.48",
         "numpy>=2.0",
+        # Moonshot's tokenization_kimi.py imports tiktoken and refuses to load
+        # without it. transformers does not pull it, so the failure lands after
+        # the image builds and the job starts, not at build time.
+        "tiktoken>=0.9",
+        "blobfile>=3.0",
     )
     .env({"CUDA_HOME": "/usr/local/cuda"})
     .add_local_dir(Path(__file__).parent, remote_path="/root/engine")
