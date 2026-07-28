@@ -9,3 +9,11 @@ dist/
 # Raw recording sessions before curation into tests/cassettes.
 .raw-recordings/
 recordings/
+
+# Codex lane scratch notes, never committed
+LANE-PROGRESS.md
+
+# Downloaded K3 tensors - tens of GB, never committed
+research/.cache/
+engine/.cache/
+*.npy

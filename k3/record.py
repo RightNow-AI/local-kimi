@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Optional
 
 CASSETTE_VERSION = 1
+_MAX_TRACKED_WRITES = 100
 
 #: Headers we never write to disk — cassettes get committed to repos.
 REDACTED_HEADERS = {
@@ -185,6 +186,10 @@ class Recorder:
             return None
         target = cassette.save(self.directory, compress=self.compress)
         self.written.append(target)
+        # Recent paths aid diagnostics; retaining every path leaks memory in
+        # long-lived servers.
+        if len(self.written) > _MAX_TRACKED_WRITES:
+            del self.written[:-_MAX_TRACKED_WRITES]
         return target
 
 
