@@ -247,16 +247,32 @@ def _mapping_from_plan(plan: Any) -> Mapping[str, Any] | None:
     return None
 
 
-def _canonical_decisions(
+def _canonical_context(
     module: ModuleType,
     specs: tuple[TensorSpec, ...],
     *,
     source_dir: Path,
     config: Mapping[str, Any],
     index: Mapping[str, Any],
-) -> tuple[TensorDecision, ...]:
+) -> dict[str, Any]:
+    """Build the argument context the canonical plan factory is called with.
+
+    Separated from `_canonical_decisions` so a test can assert what this
+    produces without needing a checkpoint on disk. That matters: this contract
+    has broken twice, both times only discovered on a rented GPU after a
+    multi-minute model load, with
+
+        TypeError: unsupported required parameter 'tensors' on
+        engine.quant.klinear_plan.build_klinear_quantization_plan
+
+    The canonical factory takes an iterable of ITS OWN TensorMetadata, which
+    this module has no reason to know about statically. Both types carry the
+    same four facts, so translate rather than duplicate the type, and do it
+    defensively so a canonical module without TensorMetadata still resolves
+    through the other keys.
+    """
     specs_by_name = {spec.name: spec for spec in specs}
-    context = {
+    context: dict[str, Any] = {
         "checkpoint_dir": source_dir,
         "model_dir": source_dir,
         "source_dir": source_dir,
@@ -267,6 +283,33 @@ def _canonical_decisions(
         "tensor_names": tuple(specs_by_name),
         "weight_names": tuple(specs_by_name),
     }
+    metadata_type = getattr(module, "TensorMetadata", None)
+    if callable(metadata_type):
+        translated = tuple(
+            metadata_type(
+                name=spec.name,
+                shape=tuple(spec.shape),
+                dtype=spec.dtype,
+                source_file=spec.shard,
+            )
+            for spec in specs
+        )
+        context["tensors"] = translated
+        context["metadata"] = translated
+        context["tensor_metadata"] = translated
+    return context
+
+
+def _canonical_decisions(
+    module: ModuleType,
+    specs: tuple[TensorSpec, ...],
+    *,
+    source_dir: Path,
+    config: Mapping[str, Any],
+    index: Mapping[str, Any],
+) -> tuple[TensorDecision, ...]:
+    specs_by_name = {spec.name: spec for spec in specs}
+    context = _canonical_context(module, specs, source_dir=source_dir, config=config, index=index)
 
     for factory_name in (
         "build_klinear_quantization_plan",

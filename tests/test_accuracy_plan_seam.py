@@ -17,10 +17,11 @@ milliseconds, instead of on a rented GPU after a checkpoint load.
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 
 import pytest
 
-from engine.accuracy.plan import TensorSpec, _invoke_with_context
+from engine.accuracy.plan import TensorSpec, _canonical_context, _invoke_with_context
 from engine.quant import klinear_plan
 from engine.quant.klinear_plan import TensorMetadata, build_klinear_quantization_plan
 
@@ -56,22 +57,21 @@ def _specs() -> tuple[TensorSpec, ...]:
 
 
 def _context_for(specs: tuple[TensorSpec, ...]) -> dict[str, object]:
-    """The translation the resolver performs, isolated for testing."""
-    translated = tuple(
-        TensorMetadata(
-            name=spec.name,
-            shape=tuple(spec.shape),
-            dtype=spec.dtype,
-            source_file=spec.shard,
-        )
-        for spec in specs
+    """The REAL context builder, not a reimplementation of it.
+
+    An earlier version of this file built the context itself. That was a false
+    positive: it proved the translation logic was correct while the production
+    path did not perform it at all, so the same TypeError reappeared on a rented
+    GPU with the suite green. A seam test that does not call the seam is not a
+    seam test.
+    """
+    return _canonical_context(
+        klinear_plan,
+        specs,
+        source_dir=Path("/weights/Kimi-Linear-48B-A3B-Instruct"),
+        config={"num_hidden_layers": 27},
+        index={"weight_map": {spec.name: spec.shard for spec in specs}},
     )
-    return {
-        "tensors": translated,
-        "metadata": translated,
-        "tensor_metadata": translated,
-        "tensor_specs": {spec.name: spec for spec in specs},
-    }
 
 
 def test_context_satisfies_every_required_parameter_of_the_canonical_factory():
