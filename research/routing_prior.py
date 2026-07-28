@@ -1,4 +1,4 @@
-"""Measure K3's routing distribution from the real router weights.
+﻿"""Measure K3's routing distribution from the real router weights.
 
 The concurrency model assumes uniform routing, which is an upper bound on the
 expert union and therefore a lower bound on throughput. That assumption has been
@@ -92,6 +92,7 @@ def main() -> int:
 
     print(f"driving the REAL router with {args.tokens} hidden states (rms 1.0, as observed)\n")
     all_curves = {}
+    all_counts: dict[int, list[int]] = {}
 
     for layer in [int(x) for x in args.layers.split(",")]:
         key = f"language_model.model.layers.{layer}.block_sparse_moe.gate.weight"
@@ -118,6 +119,7 @@ def main() -> int:
                       for _ in range(64)]
             curve[b] = float(np.mean(trials))
         all_curves[layer] = curve
+        all_counts[layer] = counts.tolist()
 
         uniform = {b: N_EXPERTS * (1 - (1 - TOP_K / N_EXPERTS) ** b) for b in curve}
         print(f"layer {layer:3d}  entropy {entropy:.3f} / {max_entropy:.3f} "
@@ -133,8 +135,24 @@ def main() -> int:
     out = CACHE / "routing_prior.json"
     out.write_text(json.dumps(all_curves, indent=2), encoding="utf-8")
     print(f"\n  union curves saved -> {out}")
+
+    # The per-expert popularity curve is what a tiered residency design needs:
+    # it says how much traffic a hot set of size k actually captures. Committed
+    # to the repo so downstream work has real data instead of a prior.
+    dist = Path("engine/residency/measured_routing.json")
+    dist.parent.mkdir(parents=True, exist_ok=True)
+    dist.write_text(json.dumps(all_counts, indent=1), encoding="utf-8")
+    print(f"  per-expert counts saved -> {dist}")
+    for layer, counts in all_counts.items():
+        c = np.array(counts, dtype=np.float64)
+        c = np.sort(c)[::-1] / c.sum()
+        cum = np.cumsum(c)
+        hits = {k: round(float(cum[k - 1]), 4) for k in (16, 32, 64, 128, 256) if k <= len(cum)}
+        print(f"    layer {layer}: hot-set coverage " +
+              "  ".join(f"top{k}={100*v:.1f}%" for k, v in hits.items()))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

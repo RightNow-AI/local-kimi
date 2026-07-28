@@ -1,0 +1,90 @@
+﻿modal : C:\Users\jaber\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\modal\_utils\async_utils.py:42: DeprecationWarning: 
+'asyncio.WindowsSelectorEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+At line:3 char:1
++ modal run engine\modal_kernelfuse.py 2>&1 | Out-File "$sp\KERNELFUSE- ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\jaber\... in Python 3.16:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+C:\Users\jaber\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\modal\_utils\async_utils.py:42: DeprecationWarning: 'asyncio.set_event_loop_policy' is 
+deprecated and slated for removal in Python 3.16
+  asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+✓ Initialized. View run at 
+https://modal.com/apps/rightnow-ai/main/ap-kHZyYk9ccXcLqjVALqAZjJ
+✓ Created objects.
+├── 🔨 Created mount 
+│   C:\Users\jaber\RightNow-Full\local-kimi\engine\modal_kernelfuse.py
+├── 🔨 Created mount C:\Users\jaber\RightNow-Full\local-kimi\engine\kernels
+├── 🔨 Created mount C:\Users\jaber\RightNow-Full\local-kimi\engine\k3ref
+└── 🔨 Created function validate_and_benchmark.
+{
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "layer": 12,
+  "expert": 0,
+  "batch": 32,
+  "benchmark_dtype": "bfloat16",
+  "correctness": {
+    "float16": {
+      "gemm_tolerance": {
+        "atol": 0.02,
+        "rtol": 0.015
+      },
+      "expert_tolerance": {
+        "atol": 0.05,
+        "rtol": 0.03
+      },
+      "projections": {
+        "w1": {
+          "max_abs_error": 0.001953125,
+          "max_rel_error": 0.002281368710100651
+        },
+        "w3": {
+          "max_abs_error": 0.001953125,
+          "max_rel_error": 0.0018656715983524919
+        },
+        "w2": {
+          "max_abs_error": 0.00048828125,
+          "max_rel_error": 0.0007087172125466168
+        }
+      },
+      "expert_max_abs_error": 0.00390625
+    },
+    "bfloat16": {
+      "gemm_tolerance": {
+        "atol": 0.08,
+        "rtol": 0.03
+      },
+      "expert_tolerance": {
+        "atol": 0.25,
+        "rtol": 0.06
+      },
+      "projections": {
+        "w1": {
+          "max_abs_error": 0.0,
+          "max_rel_error": 0.0
+        },
+        "w3": {
+          "max_abs_error": 0.0,
+          "max_rel_error": 0.0
+        },
+        "w2": {
+          "max_abs_error": 0.0,
+          "max_rel_error": 0.0
+        }
+      },
+      "expert_max_abs_error": 0.0
+    }
+  },
+  "benchmark": {
+    "scope": "three fused GEMMs plus SiTU versus three canonical decodes plus GEMMs",
+    "warmup": 5,
+    "iterations": 20,
+    "fused_median_ms": 0.7068,
+    "unfused_median_ms": 1.3152,
+    "speedup": 1.861
+  }
+}
+Stopping app - local entrypoint completed.
+✓ App completed. View run at 
+https://modal.com/apps/rightnow-ai/main/ap-kHZyYk9ccXcLqjVALqAZjJ
