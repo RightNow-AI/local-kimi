@@ -83,6 +83,10 @@ filterwarnings = ["ignore::DeprecationWarning"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# reference/ is Moonshot's own unmodified source, vendored so the golden-oracle
+# test can execute the real encoder. Linting it would mean editing it, and an
+# edited oracle is not an oracle.
+exclude = ["reference"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
