@@ -30,10 +30,20 @@ VOLUME = modal.Volume.from_name("kimi-linear-weights", create_if_missing=False)
 MOUNT = "/weights"
 MODEL_DIR = f"{MOUNT}/Kimi-Linear-48B-A3B-Instruct"
 
+# A CUDA devel base, because debian_slim is not enough for this model. There it
+# loaded all 20 shards and then died at engine core init with "Could not find
+# nvcc and default cuda_home='/usr/local/cuda' doesn't exist": Kimi-Linear's KDA
+# path JIT-compiles kernels at startup, so a CUDA toolchain has to be present at
+# RUN time. Worth recording as a deployment fact about the architecture rather
+# than quietly patching around.
 IMAGE = (
-    modal.Image.debian_slim(python_version="3.12")
-    .pip_install("vllm>=0.8", "huggingface_hub>=0.26")
-    .env({"VLLM_USE_V1": "1"})
+    modal.Image.from_registry(
+        "nvidia/cuda:12.8.1-devel-ubuntu22.04", add_python="3.12"
+    )
+    .entrypoint([])
+    .apt_install("git")
+    .pip_install("vllm==0.26.0", "huggingface_hub>=0.26")
+    .env({"VLLM_USE_V1": "1", "CUDA_HOME": "/usr/local/cuda"})
 )
 
 

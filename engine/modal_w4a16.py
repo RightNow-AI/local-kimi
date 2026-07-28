@@ -75,6 +75,7 @@ def validate_and_benchmark(
 
     import torch
     import torch.nn.functional as F
+
     from engine.k3ref.manifest import K3_LAYER_TENSOR_MANIFEST
     from engine.k3ref.weights import RawTensorStore
     from engine.quant.plan import build_quantization_plan
@@ -160,13 +161,18 @@ def validate_and_benchmark(
                     max_allowed_abs_error=None,
                 )
 
+                # Loop variables are bound as defaults rather than captured. The
+                # benchmark calls each lambda immediately so late binding would
+                # not bite here, but a timing closure that silently reads a
+                # later iteration's tensors is the kind of bug that produces a
+                # plausible wrong number instead of an error.
                 bf16_seconds = _bench(
-                    lambda: F.linear(activations, weight),
+                    lambda a=activations, w=weight: F.linear(a, w),
                     warmup=warmup,
                     iterations=iterations,
                 )
                 w4a16_seconds = _bench(
-                    lambda: w4a16_linear(activations, encoded),
+                    lambda a=activations, e=encoded: w4a16_linear(a, e),
                     warmup=warmup,
                     iterations=iterations,
                 )
