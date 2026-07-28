@@ -1,0 +1,60 @@
+﻿  "input": {
+    "shape": [
+      1,
+      2,
+      7168
+    ],
+    "dtype": "torch.bfloat16",
+    "mean": -0.0037167086265981197,
+    "std": 1.0031931400299072,
+    "rms": 1.0031650066375732,
+    "absmax": 4.21875,
+    "finite": true
+  },
+  "output": {
+    "shape": [
+      1,
+      2,
+      7168
+    ],
+    "dtype": "torch.bfloat16",
+    "mean": 0.00021043370361439884,
+    "std": 0.13162276148796082,
+    "rms": 0.13161833584308624,
+    "absmax": 0.5390625,
+    "finite": true
+  },
+  "router": {
+    "shape": [
+      2,
+      16
+    ],
+    "unique_experts": 31,
+    "weight_min": 0.057112064212560654,
+    "weight_max": 0.07186596840620041,
+    "weight_sum_min": 1.0,
+    "weight_sum_max": 1.0
+  },
+  "block_residual_shape": [
+    2,
+    1,
+    7168
+  ],
+  "recurrent_state": {
+    "shape": [
+      1,
+      96,
+      128,
+      128
+    ],
+    "dtype": "torch.float32",
+    "mean": 7.758901006127417e-07,
+    "std": 0.00046389736235141754,
+    "rms": 0.0004638978571165353,
+    "absmax": 0.05929677188396454,
+    "finite": true
+  }
+}
+Stopping app - local entrypoint completed.
+✓ App completed. View run at 
+https://modal.com/apps/rightnow-ai/main/ap-W3kk9SR9lVDayTLJVdjKvj

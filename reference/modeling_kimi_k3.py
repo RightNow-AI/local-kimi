@@ -42,8 +42,7 @@ except ImportError:
 from transformers.activations import PytorchGELUTanh
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
-from transformers.models.llava.modeling_llava import \
-    LlavaCausalLMOutputWithPast
+from transformers.models.llava.modeling_llava import LlavaCausalLMOutputWithPast
 from transformers.utils import is_flash_attn_2_available
 
 from .configuration_kimi_k3 import KimiK3Config

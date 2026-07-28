@@ -6,7 +6,6 @@ import torch
 
 from .manifest import MXFP4_GROUP_SIZE
 
-
 MXFP4_EXPONENT_BIAS = 127
 MXFP4_GROUP_SIZE = 32
 

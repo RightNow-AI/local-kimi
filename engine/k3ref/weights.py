@@ -10,7 +10,6 @@ import torch
 from .dequant import dequantize_mxfp4
 from .manifest import K3_EXPERT_CHECKPOINT_MANIFEST, TensorSpec
 
-
 _DTYPES = {
     "BOOL": torch.bool,
     "U8": torch.uint8,

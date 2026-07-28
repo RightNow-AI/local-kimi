@@ -35,7 +35,6 @@ from typing import Any, Callable
 
 import modal
 
-
 APP = modal.App("k3-engine-batch")
 IMAGE = (
     modal.Image.debian_slim(python_version="3.12")

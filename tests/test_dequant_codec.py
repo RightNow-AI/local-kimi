@@ -3,11 +3,10 @@ import torch
 
 from engine.k3ref.dequant import dequantize_mxfp4, unpack_mxfp4
 from research.verify_lossless import (
-    DecoderMismatch,
     NEGATIVE_CONTROLS,
+    DecoderMismatch,
     assert_decoder_matches_reference,
 )
-
 
 PACKED = torch.tensor(
     [

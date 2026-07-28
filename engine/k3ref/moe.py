@@ -11,7 +11,6 @@ from torch import nn
 from .norm import RMSNorm, situ
 from .router import K3Router
 
-
 ExpertProvider = Callable[
     [int, torch.device, torch.dtype],
     tuple[torch.Tensor, torch.Tensor, torch.Tensor],

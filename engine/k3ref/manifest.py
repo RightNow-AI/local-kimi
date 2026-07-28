@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 BF16 = "BF16"
 F32 = "F32"
 U8 = "U8"

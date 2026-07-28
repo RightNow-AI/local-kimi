@@ -197,7 +197,6 @@ def run_layer(layer: int = 12, experts: int = 8) -> dict:
     trained weights rather than noise.
     """
     import torch
-
     from k3ref.dequant import dequantize_mxfp4
     from k3ref.weights import RawTensorStore
 
@@ -245,7 +244,6 @@ def run_layer(layer: int = 12, experts: int = 8) -> dict:
 def run_reference_layer(layer: int = 12, sequence_length: int = 2, seed: int = 0) -> dict:
     """Run the plain PyTorch layer against fetched real weights and report activations."""
     import torch
-
     from k3ref.config import K3LayerConfig
     from k3ref.layer import K3ReferenceLayer
 

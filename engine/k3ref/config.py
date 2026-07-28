@@ -6,7 +6,6 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 _FULL_ATTENTION_LAYERS = tuple(range(4, 94, 4)) + (93,)
 
 
