@@ -8,6 +8,7 @@ from pathlib import Path
 import torch
 
 from .dequant import dequantize_mxfp4
+from .manifest import K3_EXPERT_CHECKPOINT_MANIFEST, TensorSpec
 
 
 _DTYPES = {
@@ -52,6 +53,17 @@ class RawTensorStore:
 
     def metadata(self, suffix: str) -> dict:
         return self._entries[self.find_name(suffix)][1]
+
+    def validate(self, suffix: str, spec: TensorSpec) -> None:
+        metadata = self.metadata(suffix)
+        actual_shape = tuple(metadata["shape"])
+        actual_dtype = metadata["dtype"]
+        if actual_shape != spec.shape or actual_dtype != spec.dtype:
+            raise ValueError(
+                f"checkpoint manifest mismatch for {suffix}: "
+                f"expected {spec.shape} {spec.dtype}, "
+                f"got {actual_shape} {actual_dtype}"
+            )
 
     def load(
         self,
@@ -103,6 +115,20 @@ class MXFP4ExpertProvider:
                 f"layers.{self.layer_idx}.block_sparse_moe.experts.{expert_id}"
             )
             for projection in ("w1", "w2", "w3"):
+                packed_key = (
+                    f"block_sparse_moe.experts.{{expert}}.{projection}.weight_packed"
+                )
+                scale_key = (
+                    f"block_sparse_moe.experts.{{expert}}.{projection}.weight_scale"
+                )
+                self.store.validate(
+                    f"{base}.{projection}.weight_packed",
+                    K3_EXPERT_CHECKPOINT_MANIFEST[packed_key],
+                )
+                self.store.validate(
+                    f"{base}.{projection}.weight_scale",
+                    K3_EXPERT_CHECKPOINT_MANIFEST[scale_key],
+                )
                 packed = self.store.load(
                     f"{base}.{projection}.weight_packed", device=device
                 )

@@ -101,15 +101,20 @@ class KDAAttention(nn.Module):
         self.k_proj = nn.Linear(hidden_size, projection_size, bias=False, **factory)
         self.v_proj = nn.Linear(hidden_size, projection_size, bias=False, **factory)
         self.q_conv1d = DepthwiseShortConv(
-            projection_size, conv_size, device=device, dtype=dtype
+            projection_size, conv_size, device=device, dtype=torch.float32
         )
         self.k_conv1d = DepthwiseShortConv(
-            projection_size, conv_size, device=device, dtype=dtype
+            projection_size, conv_size, device=device, dtype=torch.float32
         )
         self.v_conv1d = DepthwiseShortConv(
-            projection_size, conv_size, device=device, dtype=dtype
+            projection_size, conv_size, device=device, dtype=torch.float32
         )
-        self.A_log = nn.Parameter(torch.empty(num_heads, device=device, dtype=torch.float32))
+        # Real K3 weights carry one decay rate per head dimension, shared by heads.
+        self.A_log = nn.Parameter(
+            torch.log(
+                torch.empty(head_dim, device=device, dtype=torch.float32).uniform_(1, 16)
+            )
+        )
         self.f_a_proj = nn.Linear(hidden_size, head_dim, bias=False, **factory)
         self.f_b_proj = nn.Linear(head_dim, projection_size, bias=False, **factory)
         self.dt_bias = nn.Parameter(
@@ -126,7 +131,7 @@ class KDAAttention(nn.Module):
         biased = raw_gate.float() + self.dt_bias.float().view(
             self.num_heads, self.head_dim
         )
-        rate = self.A_log.float().exp().view(self.num_heads, 1)
+        rate = self.A_log.float().exp().view(1, self.head_dim)
         if self.gate_lower_bound is not None:
             return self.gate_lower_bound * torch.sigmoid(rate * biased)
         return -rate * F.softplus(biased)

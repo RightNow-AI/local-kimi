@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import torch
 
+from .manifest import MXFP4_GROUP_SIZE
+
 
 _E2M1_POSITIVE = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
@@ -21,7 +23,10 @@ def dequantize_mxfp4(
         raise ValueError("packed and scale tensors must both be matrices")
     rows, packed_columns = packed.shape
     value_columns = packed_columns * 2
-    if scale.shape[0] != rows or value_columns != scale.shape[1] * 32:
+    if (
+        scale.shape[0] != rows
+        or value_columns != scale.shape[1] * MXFP4_GROUP_SIZE
+    ):
         raise ValueError(
             "MXFP4 scale shape must provide one exponent for every 32 decoded values"
         )
@@ -39,5 +44,5 @@ def dequantize_mxfp4(
     nibbles[:, 1::2] = (packed >> 4).long()
     values = codebook[nibbles]
     exponents = torch.exp2(scale.to(torch.int16).float() - 127.0)
-    values = values * exponents.repeat_interleave(32, dim=1)
+    values = values * exponents.repeat_interleave(MXFP4_GROUP_SIZE, dim=1)
     return values.to(dtype)

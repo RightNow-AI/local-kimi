@@ -1,15 +1,20 @@
 import torch
 
 from engine.k3ref.dequant import dequantize_mxfp4
+from engine.k3ref.manifest import MXFP4_GROUP_SIZE
 
 
 def _pack(codes: list[int]) -> list[int]:
-    return [codes[index] | (codes[index + 1] << 4) for index in range(0, 32, 2)]
+    return [
+        codes[index] | (codes[index + 1] << 4)
+        for index in range(0, MXFP4_GROUP_SIZE, 2)
+    ]
 
 
 def test_mxfp4_decodes_both_nibbles_and_e8m0_exponents_exactly():
-    first_codes = list(range(16)) * 2
-    second_codes = list(reversed(range(16))) * 2
+    repeats = MXFP4_GROUP_SIZE // 16
+    first_codes = list(range(16)) * repeats
+    second_codes = list(reversed(range(16))) * repeats
     packed = torch.tensor(
         [_pack(first_codes), _pack(second_codes)], dtype=torch.uint8
     )

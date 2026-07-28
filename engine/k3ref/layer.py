@@ -10,6 +10,7 @@ from torch import nn
 
 from .attention import KDAAttention, KDAState, MLAAttention, MLAState
 from .config import K3LayerConfig
+from .manifest import K3_LAYER_TENSOR_MANIFEST
 from .moe import LatentMoE
 from .norm import RMSNorm, apply_attention_residual
 from .weights import MXFP4ExpertProvider, RawTensorStore
@@ -254,6 +255,9 @@ class K3ReferenceLayer(nn.Module):
             suffix: str,
             cast: torch.dtype | None = dtype,
         ) -> None:
+            checkpoint_spec = K3_LAYER_TENSOR_MANIFEST.get(suffix)
+            if checkpoint_spec is not None:
+                store.validate(prefix + suffix, checkpoint_spec)
             tensor = store.load(prefix + suffix, device=device, dtype=cast)
             _replace_parameter(module, parameter, tensor)
 
