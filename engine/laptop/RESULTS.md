@@ -1,5 +1,28 @@
 # Kimi-Linear laptop configuration
 
+## SUPERSEDED FIGURES, read this first
+
+Two numbers below have been overtaken by later work and are kept only so the
+change is auditable. Do not quote them.
+
+1. Weight residence. The 24,561,340,864 byte figure is whole-model arithmetic at
+   a flat 4.0 bits per parameter. The actual codec costs 4.5 bits per quantized
+   parameter once BF16 group scales are counted, and the quantization plan in
+   `engine/quant/klinear_plan.py` deliberately leaves the embedding, the LM head,
+   the router, all norms and biases, the KDA controls and the MLA latent
+   down-projection in source precision. That plan projects 28,789,785,344 bytes
+   from real safetensors headers. The authoritative number is the one
+   `engine/modal_quantize_klinear.py` measures from the written shards.
+   Consequently the "remaining 32 GiB capacity" line below is also too generous.
+
+2. Runtime state. This page models weights only, which is not a server claim.
+   `engine/residency/REPORT.md` carries the live budget, including the KDA
+   recurrent pool that is sized by `max_num_seqs` rather than by live sequences.
+
+The decode projections remain projections. The 60 percent attainment factor is
+transferred from a K3 measurement and has never been measured on this model or
+on a laptop.
+
 ## Recommended configuration
 
 - Model: `moonshotai/Kimi-Linear-48B-A3B-Instruct`
