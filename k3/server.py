@@ -43,6 +43,8 @@ class ServerConfig:
     port: int = 8080
     #: ``--client`` override; ``None`` means auto-detect per request.
     forced_client: Optional[str] = None
+    #: Override the detected preset's parser. ``None`` keeps the preset choice.
+    tool_parser: Optional[str] = None
     #: Token incoming requests must present. ``None`` means open (local use).
     auth_token: Optional[str] = None
     record_dir: Optional[str] = None
@@ -136,7 +138,11 @@ def create_app(cfg: Optional[ServerConfig] = None, engine: Any = None) -> FastAP
         )
 
     if engine is None:
-        engine = MockUpstream(cfg.upstream) if cfg.mock else Upstream(cfg.upstream)
+        engine = (
+            MockUpstream(cfg.upstream, tool_parser=cfg.tool_parser or "kimi_k3")
+            if cfg.mock
+            else Upstream(cfg.upstream)
+        )
 
     app.state.config = cfg
     app.state.engine = engine
@@ -273,7 +279,7 @@ def create_app(cfg: Optional[ServerConfig] = None, engine: Any = None) -> FastAP
             return pipeline.run(
                 engine_for_request,
                 payload,
-                tool_parser=preset.tool_parser,
+                tool_parser=cfg.tool_parser or preset.tool_parser,
                 ledger=app.state.ledger,
                 reasoning_field=cfg.upstream.reasoning_field,
                 stream=stream,

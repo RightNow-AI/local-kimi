@@ -353,7 +353,7 @@ def render_kimi_k3_tool_call(
     index: int = 1,
     json_block: Optional[str] = None,
 ) -> str:
-    """Render one canonical K3 ``call`` element."""
+    """Render one canonical K3 ``call`` from dict or OpenAI JSON arguments."""
     return _render_kimi_k3_tool_call(
         name,
         arguments,
@@ -371,6 +371,21 @@ def _render_kimi_k3_tool_call(
     index: int,
     json_block: Optional[str],
 ) -> str:
+    if json_block is None and isinstance(arguments, str):
+        if not arguments.strip():
+            arguments = {}
+        else:
+            try:
+                decoded = json.loads(arguments)
+            except json.JSONDecodeError:
+                # Preserve malformed wire bytes instead of silently dropping them.
+                json_block = arguments
+            else:
+                if isinstance(decoded, dict):
+                    arguments = decoded
+                else:
+                    json_block = arguments
+
     out = [_k3_open("call", [("tool", name), ("index", index)])]
     if json_block is not None:
         out.append(_k3_open("json", [("type", "object")]))
