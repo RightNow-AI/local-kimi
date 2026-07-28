@@ -1,11 +1,10 @@
 """Measure Kimi-Linear persistent state allocations on one Modal H100.
 
-The default points end with the disputed ``16 x 32K`` envelope. Its projected
-state pool is about 70.65 GiB, so an allocator OOM is possible and is recorded
-as evidence rather than hidden. Override ``--points`` to probe a different
-envelope. This harness intentionally does not load model weights, so its
-measured comparison is against ``state_pool_bytes`` only. Weight bytes and
-operational headroom remain projected fields in the emitted JSON.
+The default policy is vLLM's compressed latent cache. Pass ``expanded`` to
+measure the Hugging Face reference layout instead. The default points end with
+the disputed ``16 x 32K`` envelope. This harness intentionally does not load
+model weights, so its measured comparison is against ``state_pool_bytes`` only.
+Weight bytes and operational headroom remain projected fields in the JSON.
 
 Run only through the orchestrator:
 
@@ -53,6 +52,7 @@ def _parse_points(value: str) -> list[tuple[int, int]]:
 def measure_residency(
     points: list[tuple[int, int]],
     quantization_profile: str = "int4",
+    mla_cache_policy: str = "compressed_latent",
     recurrent_dtype: str = "float32",
     conv_dtype: str = "bfloat16",
     mla_dtype: str = "bfloat16",
@@ -71,9 +71,11 @@ def measure_residency(
         KIMI_LINEAR_SHAPE,
         MODEL_ID,
         MODEL_MAX_LENGTH,
+        MLACachePolicy,
         RuntimeHeadroom,
         StateDTypes,
         build_residency_budget,
+        resolve_mla_cache_policy,
     )
 
     scalar_dtypes = {
@@ -102,6 +104,7 @@ def measure_residency(
         activation_bytes=activation_headroom_gib * GIB,
         workspace_bytes=workspace_headroom_gib * GIB,
     )
+    resolved_mla_cache_policy = resolve_mla_cache_policy(mla_cache_policy)
     device = torch.device("cuda")
     properties = torch.cuda.get_device_properties(0)
 
@@ -115,6 +118,7 @@ def measure_residency(
             quantization_profile,
             max_num_seqs,
             max_model_len,
+            mla_cache_policy=resolved_mla_cache_policy,
             state_dtypes=state_dtypes,
             headroom=headroom,
         )
@@ -185,34 +189,45 @@ def measure_residency(
                     )
                 )
 
-            mla_key_width = (
-                shape.mla_qk_nope_head_dim + shape.mla_qk_rope_head_dim
-            )
-            for _ in range(shape.mla_layers):
-                allocations.append(
-                    torch.empty(
-                        (
-                            max_num_seqs,
-                            shape.mla_num_heads,
-                            max_model_len,
-                            mla_key_width,
-                        ),
-                        dtype=torch_dtypes[mla_dtype],
-                        device=device,
-                    )
+            if resolved_mla_cache_policy is MLACachePolicy.EXPANDED:
+                mla_key_width = (
+                    shape.mla_qk_nope_head_dim + shape.mla_qk_rope_head_dim
                 )
-                allocations.append(
-                    torch.empty(
-                        (
-                            max_num_seqs,
-                            shape.mla_num_heads,
-                            max_model_len,
-                            shape.mla_value_head_dim,
-                        ),
-                        dtype=torch_dtypes[mla_dtype],
-                        device=device,
+                for _ in range(shape.mla_layers):
+                    allocations.append(
+                        torch.empty(
+                            (
+                                max_num_seqs,
+                                shape.mla_num_heads,
+                                max_model_len,
+                                mla_key_width,
+                            ),
+                            dtype=torch_dtypes[mla_dtype],
+                            device=device,
+                        )
                     )
-                )
+                    allocations.append(
+                        torch.empty(
+                            (
+                                max_num_seqs,
+                                shape.mla_num_heads,
+                                max_model_len,
+                                shape.mla_value_head_dim,
+                            ),
+                            dtype=torch_dtypes[mla_dtype],
+                            device=device,
+                        )
+                    )
+            else:
+                compressed_width = shape.mla_compressed_elements_per_token_per_layer
+                for _ in range(shape.mla_layers):
+                    allocations.append(
+                        torch.empty(
+                            (max_num_seqs, max_model_len, compressed_width),
+                            dtype=torch_dtypes[mla_dtype],
+                            device=device,
+                        )
+                    )
 
             torch.cuda.synchronize()
             tensor_storage_bytes = sum(
@@ -299,6 +314,7 @@ def measure_residency(
             "matches_inspected_runtime": state_dtypes.matches_inspected_runtime,
         },
         "quantization_profile": quantization_profile,
+        "mla_cache_policy": resolved_mla_cache_policy.value,
         "points": result_points,
     }
     return output
@@ -308,6 +324,7 @@ def measure_residency(
 def main(
     points: str = DEFAULT_POINTS,
     quantization_profile: str = "int4",
+    mla_cache_policy: str = "compressed_latent",
     recurrent_dtype: str = "float32",
     conv_dtype: str = "bfloat16",
     mla_dtype: str = "bfloat16",
@@ -317,6 +334,7 @@ def main(
     result = measure_residency.remote(
         points=_parse_points(points),
         quantization_profile=quantization_profile,
+        mla_cache_policy=mla_cache_policy,
         recurrent_dtype=recurrent_dtype,
         conv_dtype=conv_dtype,
         mla_dtype=mla_dtype,

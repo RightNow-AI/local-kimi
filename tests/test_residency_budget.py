@@ -3,10 +3,14 @@ from __future__ import annotations
 import pytest
 
 from engine.residency.budget import (
+    BF16,
     INT4_WEIGHTS,
+    KIMI_LINEAR_SHAPE,
+    MLACachePolicy,
     ResidencyBudgetExceeded,
     RuntimeHeadroom,
     build_residency_budget,
+    mla_kv_bytes_per_token_per_sequence,
     require_envelope_fits,
     solve_residency_frontier,
 )
@@ -65,6 +69,40 @@ def test_mla_kv_cache_scales_with_both_sequences_and_context() -> None:
 
     assert twice_sequences.mla_kv_cache_bytes == 2 * base.mla_kv_cache_bytes
     assert twice_context.mla_kv_cache_bytes == 2 * base.mla_kv_cache_bytes
+
+
+def test_mla_cache_policies_have_distinct_source_derived_token_costs() -> None:
+    expanded = mla_kv_bytes_per_token_per_sequence(
+        cache_policy=MLACachePolicy.EXPANDED,
+        dtype=BF16,
+    )
+    compressed = mla_kv_bytes_per_token_per_sequence(
+        cache_policy=MLACachePolicy.COMPRESSED_LATENT,
+        dtype=BF16,
+    )
+    compressed_elements_per_layer = (
+        KIMI_LINEAR_SHAPE.mla_kv_lora_rank
+        + KIMI_LINEAR_SHAPE.mla_qk_rope_head_dim
+    )
+
+    assert expanded == 143_360
+    assert compressed == 8_064
+    assert compressed == (
+        KIMI_LINEAR_SHAPE.mla_layers
+        * compressed_elements_per_layer
+        * BF16.bytes_per_element
+    )
+    assert expanded != compressed
+
+    compressed_budget = build_residency_budget(
+        INT4_WEIGHTS,
+        max_num_seqs=1,
+        max_model_len=1,
+        mla_cache_policy=MLACachePolicy.COMPRESSED_LATENT,
+        headroom=NO_HEADROOM,
+    )
+    assert compressed_budget.mla_cache_policy == "compressed_latent"
+    assert compressed_budget.mla_kv_cache_bytes == compressed
 
 
 def test_solver_and_guard_never_return_an_over_budget_envelope() -> None:

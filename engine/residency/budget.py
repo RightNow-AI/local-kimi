@@ -2,7 +2,9 @@
 
 The persistent state shapes are derived from the model repository at revision
 e1df551a447157d4658b573f9a695d57658590e9 and from the unpinned ``fla-core``
-dependency at revision 9c8e42e762fce087c27b673af4922795d9edb85e.
+dependency at revision 9c8e42e762fce087c27b673af4922795d9edb85e. The
+compressed MLA policy is derived from vLLM 0.26.0 at revision
+568afb3a13806beb53bb2e6bd518269357b237c0.
 
 This module performs byte arithmetic only. It does not claim that a projected
 envelope was measured or that an engine can serve it until the Modal harness
@@ -12,6 +14,7 @@ has produced a matching allocation result.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from enum import Enum
 from typing import Iterable
 
 GIB = 1 << 30
@@ -19,6 +22,7 @@ MIB = 1 << 20
 MODEL_ID = "moonshotai/Kimi-Linear-48B-A3B-Instruct"
 MODEL_REVISION = "e1df551a447157d4658b573f9a695d57658590e9"
 FLA_REVISION = "9c8e42e762fce087c27b673af4922795d9edb85e"
+VLLM_REVISION = "568afb3a13806beb53bb2e6bd518269357b237c0"
 MODEL_MAX_LENGTH = 1_048_576
 
 
@@ -66,6 +70,17 @@ class StateDTypes:
 INSPECTED_STATE_DTYPES = StateDTypes()
 
 
+class MLACachePolicy(str, Enum):
+    """Persistent MLA cache layouts used by real model implementations."""
+
+    EXPANDED = "expanded"
+    COMPRESSED_LATENT = "compressed_latent"
+
+
+HF_REFERENCE_MLA_CACHE_POLICY = MLACachePolicy.EXPANDED
+VLLM_MLA_CACHE_POLICY = MLACachePolicy.COMPRESSED_LATENT
+
+
 @dataclass(frozen=True, slots=True)
 class QuantizationProfile:
     """Exact resident weight bytes supplied by a weight format profile."""
@@ -109,6 +124,7 @@ class KimiLinearResidencyShape:
     kda_value_head_dim: int = 128
     short_conv_kernel_size: int = 4
     mla_num_heads: int = 32
+    mla_kv_lora_rank: int = 512
     mla_qk_nope_head_dim: int = 128
     mla_qk_rope_head_dim: int = 64
     mla_value_head_dim: int = 128
@@ -140,6 +156,10 @@ class KimiLinearResidencyShape:
     def mla_value_elements_per_token_per_layer(self) -> int:
         return self.mla_num_heads * self.mla_value_head_dim
 
+    @property
+    def mla_compressed_elements_per_token_per_layer(self) -> int:
+        return self.mla_kv_lora_rank + self.mla_qk_rope_head_dim
+
 
 KIMI_LINEAR_SHAPE = KimiLinearResidencyShape()
 
@@ -168,6 +188,7 @@ class ResidencyBreakdown:
     """A complete projected byte breakdown for one server envelope."""
 
     quantization_profile: str
+    mla_cache_policy: str
     max_num_seqs: int
     max_model_len: int
     state_dtypes: StateDTypes
@@ -251,6 +272,27 @@ def resolve_quantization_profile(
         raise ValueError(f"unknown quantization profile {profile!r}; choose {known}") from exc
 
 
+def resolve_mla_cache_policy(
+    policy: MLACachePolicy | str,
+) -> MLACachePolicy:
+    if isinstance(policy, MLACachePolicy):
+        return policy
+    if not isinstance(policy, str):
+        raise ValueError("MLA cache policy must be a string or MLACachePolicy")
+    aliases = {
+        "expanded": MLACachePolicy.EXPANDED,
+        "compressed": MLACachePolicy.COMPRESSED_LATENT,
+        "compressed-latent": MLACachePolicy.COMPRESSED_LATENT,
+        "compressed latent": MLACachePolicy.COMPRESSED_LATENT,
+        "compressed_latent": MLACachePolicy.COMPRESSED_LATENT,
+    }
+    try:
+        return aliases[policy.strip().lower()]
+    except KeyError as exc:
+        known = ", ".join(item.value for item in MLACachePolicy)
+        raise ValueError(f"unknown MLA cache policy {policy!r}; choose {known}") from exc
+
+
 def kda_recurrent_bytes_per_sequence(
     *,
     shape: KimiLinearResidencyShape = KIMI_LINEAR_SHAPE,
@@ -277,13 +319,18 @@ def short_conv_bytes_per_sequence(
 
 def mla_kv_bytes_per_token_per_sequence(
     *,
+    cache_policy: MLACachePolicy | str = HF_REFERENCE_MLA_CACHE_POLICY,
     shape: KimiLinearResidencyShape = KIMI_LINEAR_SHAPE,
     dtype: ScalarDType = BF16,
 ) -> int:
-    elements_per_layer = (
-        shape.mla_key_elements_per_token_per_layer
-        + shape.mla_value_elements_per_token_per_layer
-    )
+    policy = resolve_mla_cache_policy(cache_policy)
+    if policy is MLACachePolicy.EXPANDED:
+        elements_per_layer = (
+            shape.mla_key_elements_per_token_per_layer
+            + shape.mla_value_elements_per_token_per_layer
+        )
+    else:
+        elements_per_layer = shape.mla_compressed_elements_per_token_per_layer
     return shape.mla_layers * elements_per_layer * dtype.bytes_per_element
 
 
@@ -292,6 +339,7 @@ def build_residency_budget(
     max_num_seqs: int,
     max_model_len: int,
     *,
+    mla_cache_policy: MLACachePolicy | str = HF_REFERENCE_MLA_CACHE_POLICY,
     state_dtypes: StateDTypes = INSPECTED_STATE_DTYPES,
     headroom: RuntimeHeadroom = DEFAULT_HEADROOM,
     shape: KimiLinearResidencyShape = KIMI_LINEAR_SHAPE,
@@ -308,6 +356,7 @@ def build_residency_budget(
         )
 
     profile = resolve_quantization_profile(quantization_profile)
+    resolved_mla_cache_policy = resolve_mla_cache_policy(mla_cache_policy)
     recurrent = max_num_seqs * kda_recurrent_bytes_per_sequence(
         shape=shape,
         dtype=state_dtypes.recurrent_state,
@@ -320,6 +369,7 @@ def build_residency_budget(
         max_num_seqs
         * max_model_len
         * mla_kv_bytes_per_token_per_sequence(
+            cache_policy=resolved_mla_cache_policy,
             shape=shape,
             dtype=state_dtypes.mla_kv_cache,
         )
@@ -334,6 +384,7 @@ def build_residency_budget(
     )
     return ResidencyBreakdown(
         quantization_profile=profile.key,
+        mla_cache_policy=resolved_mla_cache_policy.value,
         max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
         state_dtypes=state_dtypes,
@@ -353,6 +404,7 @@ def require_envelope_fits(
     max_num_seqs: int,
     max_model_len: int,
     *,
+    mla_cache_policy: MLACachePolicy | str = HF_REFERENCE_MLA_CACHE_POLICY,
     state_dtypes: StateDTypes = INSPECTED_STATE_DTYPES,
     headroom: RuntimeHeadroom = DEFAULT_HEADROOM,
     shape: KimiLinearResidencyShape = KIMI_LINEAR_SHAPE,
@@ -365,6 +417,7 @@ def require_envelope_fits(
         quantization_profile,
         max_num_seqs,
         max_model_len,
+        mla_cache_policy=mla_cache_policy,
         state_dtypes=state_dtypes,
         headroom=headroom,
         shape=shape,
@@ -384,6 +437,7 @@ def solve_residency_frontier(
     *,
     max_num_seqs_values: Iterable[int] = (1, 2, 4, 8, 16, 32, 64, 128, 256),
     max_model_len_cap: int = MODEL_MAX_LENGTH,
+    mla_cache_policy: MLACachePolicy | str = HF_REFERENCE_MLA_CACHE_POLICY,
     state_dtypes: StateDTypes = INSPECTED_STATE_DTYPES,
     headroom: RuntimeHeadroom = DEFAULT_HEADROOM,
     shape: KimiLinearResidencyShape = KIMI_LINEAR_SHAPE,
@@ -403,6 +457,7 @@ def solve_residency_frontier(
         )
 
     profile = resolve_quantization_profile(quantization_profile)
+    resolved_mla_cache_policy = resolve_mla_cache_policy(mla_cache_policy)
     sequence_values = tuple(sorted(set(max_num_seqs_values)))
     if not sequence_values or any(value <= 0 for value in sequence_values):
         raise ValueError("max_num_seqs_values must contain positive integers")
@@ -416,6 +471,7 @@ def solve_residency_frontier(
         dtype=state_dtypes.short_conv_state,
     )
     mla_per_token_per_seq = mla_kv_bytes_per_token_per_sequence(
+        cache_policy=resolved_mla_cache_policy,
         shape=shape,
         dtype=state_dtypes.mla_kv_cache,
     )
@@ -440,6 +496,7 @@ def solve_residency_frontier(
             profile,
             max_num_seqs,
             max_model_len,
+            mla_cache_policy=resolved_mla_cache_policy,
             state_dtypes=state_dtypes,
             headroom=headroom,
             shape=shape,
