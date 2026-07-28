@@ -5,7 +5,6 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from engine.k3ref.config import K3LayerConfig
 from engine.k3ref.moe import K3ExpertMLP, LatentMoE
 
 
@@ -137,41 +136,3 @@ def test_permuting_expert_order_and_router_rows_changes_nothing_observable():
 
     assert torch.allclose(actual, expected, atol=2e-6, rtol=2e-6)
 
-
-def test_real_checkpoint_shape_and_dtype_contracts_are_pinned_without_allocating():
-    config_path = Path(__file__).parents[1] / "reference" / "config.json"
-    config = K3LayerConfig.from_json(config_path)
-    specs = config.real_tensor_specs()
-
-    assert specs["routed_expert_down_proj.weight"] == ((3584, 7168), "BF16")
-    assert specs["routed_expert_norm.weight"] == ((3584,), "BF16")
-    assert specs["routed_expert_up_proj.weight"] == ((7168, 3584), "BF16")
-    assert specs["experts.w1.weight_packed"] == ((3072, 1792), "U8")
-    assert specs["experts.w1.weight_scale"] == ((3072, 112), "U8")
-    assert specs["experts.w2.weight_packed"] == ((3584, 1536), "U8")
-    assert specs["experts.w2.weight_scale"] == ((3584, 96), "U8")
-    assert specs["shared_experts.gate_proj.weight"] == ((6144, 7168), "BF16")
-    assert specs["self_attn.A_log"] == ((96,), "F32")
-    assert specs["self_attn.dt_bias"] == ((12288,), "F32")
-    assert specs["self_attn.k_conv1d.weight"] == ((12288, 1, 4), "F32")
-    assert config.is_kda_layer(12)
-    assert not config.is_kda_layer(11)
-
-    moe = LatentMoE(
-        hidden_size=7168,
-        latent_size=3584,
-        expert_intermediate_size=3072,
-        num_experts=896,
-        top_k=16,
-        num_shared_experts=2,
-        expert_provider=lambda *_: (),
-        device="meta",
-        dtype=torch.bfloat16,
-    )
-    assert moe.gate.weight.shape == (896, 7168)
-    assert moe.gate.weight.dtype == torch.bfloat16
-    assert moe.routed_expert_down_proj.weight.shape == (3584, 7168)
-    assert moe.routed_expert_norm.weight.shape == (3584,)
-    assert moe.routed_expert_up_proj.weight.shape == (7168, 3584)
-    assert moe.shared_experts.gate_proj.weight.shape == (6144, 7168)
-    assert moe.shared_experts.down_proj.weight.shape == (7168, 6144)

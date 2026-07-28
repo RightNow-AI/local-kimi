@@ -151,6 +151,27 @@ def test_kda_scalar_recurrence_matches_the_delta_rule_analytically():
     assert torch.allclose(output, expected, atol=1e-6, rtol=1e-6)
 
 
+def test_kda_a_log_is_per_head_dimension_and_shared_across_heads():
+    attention = KDAAttention(
+        hidden_size=6,
+        num_heads=2,
+        head_dim=3,
+        gate_lower_bound=-5.0,
+    )
+    with torch.no_grad():
+        # log(0) is -inf, which would make the first decay term degenerate and
+        # disagrees with the expectation below, which is written for A = [1,2,4].
+        attention.A_log.copy_(torch.tensor([1.0, 2.0, 4.0]).log())
+        attention.dt_bias.zero_()
+    raw_gate = torch.ones(1, 1, 2, 3)
+
+    actual = attention._decay_gate(raw_gate)
+    expected_per_dimension = -5.0 * torch.sigmoid(torch.tensor([1.0, 2.0, 4.0]))
+    expected = expected_per_dimension.view(1, 1, 1, 3).expand(1, 1, 2, 3)
+
+    assert torch.allclose(actual, expected, atol=1e-7, rtol=1e-7)
+
+
 def test_moonshot_kda_call_pins_all_fused_recurrence_options():
     source = (
         Path(__file__).parents[1] / "reference" / "modeling_kimi_linear.py"
