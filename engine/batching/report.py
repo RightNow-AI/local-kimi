@@ -12,6 +12,8 @@ from typing import Iterable
 try:
     from engine.batching.union_model import (
         DEFAULT_CONCURRENCIES,
+        DEFAULT_DENSE_BYTES,
+        DEFAULT_DENSE_PARAMETERS,
         ExpertUnionModel,
         HardwareConfig,
         RoutingPrior,
@@ -22,6 +24,8 @@ try:
 except ModuleNotFoundError:  # Direct execution as engine/batching/report.py.
     from union_model import (
         DEFAULT_CONCURRENCIES,
+        DEFAULT_DENSE_BYTES,
+        DEFAULT_DENSE_PARAMETERS,
         ExpertUnionModel,
         HardwareConfig,
         RoutingPrior,
@@ -36,6 +40,7 @@ class DecisionRow:
     concurrency: int
     expected_union: float
     routed_traffic_gb_per_token: float
+    dense_milliseconds_per_token: float
     aggregate_tokens_per_second: float
     per_agent_tokens_per_second: float
 
@@ -46,17 +51,23 @@ def build_decision_rows(
     hardware: HardwareConfig,
     concurrencies: Iterable[int] = DEFAULT_CONCURRENCIES,
     prior: RoutingPrior | None = None,
+    compute_scale: float = 1.0,
 ) -> list[DecisionRow]:
     """Build rows entirely from the supplied model and hardware calibration."""
     rows = []
     for concurrency in concurrencies:
-        prediction = hardware.predict(model, concurrency, prior)
+        prediction = hardware.predict(
+            model, concurrency, prior, compute_scale=compute_scale
+        )
         rows.append(
             DecisionRow(
                 concurrency=concurrency,
                 expected_union=prediction.expected_union,
                 routed_traffic_gb_per_token=(
                     prediction.routed_traffic_gb_per_token
+                ),
+                dense_milliseconds_per_token=(
+                    prediction.dense_seconds_per_token * 1_000.0
                 ),
                 aggregate_tokens_per_second=(
                     prediction.aggregate_tokens_per_second
@@ -91,8 +102,8 @@ def _fmt(value: float, digits: int = 2) -> str:
 
 def _table(rows: Iterable[DecisionRow]) -> list[str]:
     lines = [
-        "| Agents | Expected union | Routed GB/token | Aggregate tok/s | Per-agent tok/s |",
-        "| ---: | ---: | ---: | ---: | ---: |",
+        "| Agents | Expected union | Routed GB/token | Dense ms/token | Aggregate tok/s | Per-agent tok/s |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         lines.append(
@@ -102,6 +113,7 @@ def _table(rows: Iterable[DecisionRow]) -> list[str]:
                     str(row.concurrency),
                     _fmt(row.expected_union, 1),
                     _fmt(row.routed_traffic_gb_per_token, 2),
+                    _fmt(row.dense_milliseconds_per_token, 3),
                     _fmt(row.aggregate_tokens_per_second, 2),
                     _fmt(row.per_agent_tokens_per_second, 2),
                 )
@@ -120,34 +132,41 @@ def render_markdown(
     model = model or ExpertUnionModel()
     hardware_configs = default_hardware_configs(model)
     epyc_12 = hardware_configs[0]
-    epyc_8 = hardware_configs[1]
-    pcie = hardware_configs[2]
     zipf_mild = zipf_prior(exponent=0.5)
     zipf_strong = zipf_prior(exponent=1.0)
     dirichlet = dirichlet_prior(alpha=0.3)
 
     batch1_bytes = model.batch1_routed_traffic_bytes
+    routed_gb = batch1_bytes / 1e9
+    dense_gb = DEFAULT_DENSE_BYTES / 1e9
+    total_batch1_weight_gb = routed_gb + dense_gb
+    batch1_weight_seconds = total_batch1_weight_gb / epyc_12.routed_bandwidth_gb_s
+    old_remaining_seconds = 1.0 / 9.0 - routed_gb / 450.0
+    old_implied_dense_bandwidth = dense_gb / old_remaining_seconds
     union_95 = _uniform_union_concurrency(model, 0.95)
     union_99 = _uniform_union_concurrency(model, 0.99)
 
     lines = [
         "# Kimi K3 parallel-agent batching decision report",
         "",
-        "> Every throughput number below is modelled, not measured, except the stated batch-1 calibration inputs. The Modal harness is the measurement gate.",
+        "> Every throughput number below is modelled, not measured. The 9.0 and 2.1 tok/s batch-1 anchors are retained only as refuted historical comparisons. The Modal harness is the measurement gate.",
         "",
         "## Arithmetic",
         "",
         f"- Batch-1 routed expert traffic = {model.experts_per_token} experts/token x {model.expert_bytes:,} bytes/expert x {model.moe_layers} MoE layers = {batch1_bytes:,} bytes = {batch1_bytes / 1e9:.9f} GB/token.",
+        "- K3 activates 18 experts per token: 16 routed 4-bit experts plus 2 shared BF16 experts. The 2 shared experts are included in the dense mass, not in routed expert traffic.",
         f"- Uniform union = {model.total_experts} x (1 - (1 - {model.experts_per_token}/{model.total_experts})^B).",
         "- Routed traffic/token = expected union x bytes/expert x MoE layers / B.",
-        "- Batch time = routed union GB / routed bandwidth + B x calibrated non-union seconds/token.",
+        f"- Dense mass = {DEFAULT_DENSE_PARAMETERS:,} BF16 parameters x 2 bytes = {DEFAULT_DENSE_BYTES:,} bytes = {dense_gb:.3f} GB per forward pass.",
+        "- Corrected batch time = (routed union bytes + dense bytes) / bandwidth + B x per-token compute.",
         "- Aggregate tok/s = B / batch time. Per-agent tok/s = aggregate tok/s / B.",
-        f"- 12-channel residual = 1/9.0 - {batch1_bytes / 1e9:.9f}/450 = {epyc_12.non_union_seconds_per_token:.9f} seconds/token. Its Amdahl ceiling is 1/residual = {epyc_12.asymptotic_aggregate_tokens_per_second:.6f} tok/s.",
-        f"- 8-channel batch-1 prediction = 1 / ({batch1_bytes / 1e9:.9f}/350 + {epyc_8.non_union_seconds_per_token:.9f}) = {epyc_8.predict(model, 1).aggregate_tokens_per_second:.6f} tok/s.",
-        f"- PCIe residual = 1/2.1 - {batch1_bytes / 1e9:.9f}/55 = {pcie.non_union_seconds_per_token:.9f} seconds/token.",
+        f"- True 12-channel batch-1 weight time = ({routed_gb:.9f} + {dense_gb:.3f})/450 = {batch1_weight_seconds:.9f} seconds, so the optimistic weight-only roofline is {1.0 / batch1_weight_seconds:.6f} tok/s.",
+        f"- The refuted 9.0 tok/s anchor leaves only {old_remaining_seconds * 1_000:.6f} ms after routed traffic and therefore implies {old_implied_dense_bandwidth:,.1f} GB/s for the dense mass against a 450 GB/s bus.",
+        "- Per-token compute defaults to 0 seconds because no physically valid measurement remains to calibrate it. This makes every corrected table an optimistic upper bound; real compute can only reduce throughput.",
+        f"- Dense cost/token at B=32 is ({dense_gb:.3f}/450)/32 = {dense_gb / 450.0 / 32.0 * 1_000:.6f} ms, exactly 1/32 of B=1.",
         f"- Under uniform routing, the union reaches 95% of all experts at B={union_95} and 99% at B={union_99}.",
         "",
-        "The non-union term is an Amdahl-style calibration residual. It includes compute, router, attention, shared-expert, synchronization, and implementation costs that the union-only equation does not explain. Treating all of it as per-token work gives a finite ceiling. Real batching may amortize some of it, while contention may make other parts worse.",
+        "The uniform independent-routing prior is the upper-bound union within the fixed-marginal skew family used here. Real token correlations are not measured by this prior. Only instrumented generation traces establish the real union curve.",
         "",
         "## Uniform-routing decision tables",
         "",
@@ -162,13 +181,15 @@ def render_markdown(
         )
         all_rows[hardware.key] = rows
         feasibility = "feasible" if hardware.feasible else "capacity-infeasible"
-        ceiling = hardware.asymptotic_aggregate_tokens_per_second
         lines.extend(
             [
                 f"### {hardware.label}",
                 "",
                 f"Status: {feasibility}. {hardware.calibration}.",
-                f"Modelled non-union ceiling: {ceiling:.2f} aggregate tok/s.",
+                f"Old batch-1 anchor or inherited estimate: {hardware.old_batch1_tokens_per_second:.4f} tok/s.",
+                f"Corrected optimistic batch-1 roofline: {hardware.predict(model, 1).aggregate_tokens_per_second:.4f} tok/s.",
+                f"Dense pass cost: {hardware.dense_bytes / 1e9 / hardware.routed_bandwidth_gb_s * 1_000:.3f} ms for {hardware.dense_bytes / 1e9:.3f} GB at {hardware.routed_bandwidth_gb_s:,.0f} GB/s.",
+                f"Per-token compute input: {hardware.per_token_compute_seconds * 1_000:.3f} ms/token.",
                 f"Caveat: {hardware.caveat}",
                 "",
                 *_table(rows),
@@ -206,6 +227,49 @@ def render_markdown(
             + " |"
         )
 
+    compute_scales = (1.0, 0.5, 0.33)
+    sensitivity_rows = {
+        scale: build_decision_rows(
+            model=model,
+            hardware=primary,
+            concurrencies=concurrencies,
+            compute_scale=scale,
+        )
+        for scale in compute_scales
+    }
+    lines.extend(
+        [
+            "",
+            "## Kernel-optimization sensitivity on the primary workstation",
+            "",
+            "Everything except the per-token compute term is held fixed. Its baseline is deliberately 0 ms because both prior anchors are physically impossible. Therefore 1.0x, 0.5x, and 0.33x are identical optimistic weight-bandwidth ceilings.",
+            "",
+            "Kernel work cannot improve these modeled numbers because the model already assumes free token compute. Measured nonzero compute would lower the 1.0x result, and optimization could only recover toward this table.",
+            "",
+            "| Agents | 1.0x agg | 1.0x per agent | 0.5x agg | 0.5x per agent | 0.33x agg | 0.33x per agent |",
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for index, concurrency in enumerate(concurrencies):
+        base = sensitivity_rows[1.0][index]
+        half = sensitivity_rows[0.5][index]
+        third = sensitivity_rows[0.33][index]
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    str(concurrency),
+                    _fmt(base.aggregate_tokens_per_second, 2),
+                    _fmt(base.per_agent_tokens_per_second, 2),
+                    _fmt(half.aggregate_tokens_per_second, 2),
+                    _fmt(half.per_agent_tokens_per_second, 2),
+                    _fmt(third.aggregate_tokens_per_second, 2),
+                    _fmt(third.per_agent_tokens_per_second, 2),
+                )
+            )
+            + " |"
+        )
+
     primary_rows = all_rows["epyc-12ch-5090"]
     secondary_rows = all_rows["epyc-8ch-5090"]
     primary_usable = _max_agent_count(primary_rows, 1.0)
@@ -220,6 +284,14 @@ def render_markdown(
         ),
         None,
     )
+    optimized_usable = {
+        scale: _max_agent_count(rows, 1.0)
+        for scale, rows in sensitivity_rows.items()
+    }
+    optimized_comfortable = {
+        scale: _max_agent_count(rows, 2.0)
+        for scale, rows in sensitivity_rows.items()
+    }
     lines.extend(
         [
             "",
@@ -229,11 +301,13 @@ def render_markdown(
             "",
             f"On the central 12-channel model, {primary_comfortable} agents are comfortable and {primary_usable} agents remain minimally usable among the requested concurrency points. At {primary_first_unusable} agents the uniform model is already below 1 tok/s/agent.",
             "",
-            f"On the central 8-channel model, {secondary_comfortable} agents are comfortable and {secondary_usable} agents remain minimally usable. The 8-agent point is close enough to the threshold that the stated 300-400 GB/s bandwidth spread can move it across the line.",
+            f"On the central 8-channel model, {secondary_comfortable} agents are comfortable and {secondary_usable} agents remain minimally usable. The corrected 8-agent midpoint is {secondary_rows[concurrencies.index(8)].per_agent_tokens_per_second:.2f} tok/s/agent.",
             "",
-            f"The honest planning number is therefore {primary_comfortable} parallel coding agents without qualification, or {primary_usable} on a well-tuned 12-channel workstation if roughly 1 tok/s/agent is acceptable. Do not plan around {primary_first_unusable} or more interactive agents from this model. Aggregate throughput keeps rising after that, but per-agent output becomes too slow, and the modelled aggregate ceiling is {primary.asymptotic_aggregate_tokens_per_second:.2f} tok/s before any real-router correction.",
+            f"The optimistic planning ceiling is {primary_comfortable} parallel coding agents at or above 2 tok/s/agent, or {primary_usable} at or above 1 tok/s/agent under the uniform upper-bound union. At {primary_first_unusable} agents even the zero-compute roofline is only {primary_rows[concurrencies.index(primary_first_unusable)].per_agent_tokens_per_second:.2f} tok/s/agent.",
             "",
-            f"The expert union itself is effectively saturated around {union_95}-{union_99} concurrent tokens. The product becomes per-agent-rate-limited much earlier, between {primary_usable} and {primary_first_unusable} agents. The real measurement harness must replace the skew prior and the calibrated residual before this becomes a measured capacity claim.",
+            f"Kernel sensitivity does not move the result because the baseline already assumes zero token-compute cost: 1.0x, 0.5x, and 0.33x each retain {optimized_usable[1.0]}, {optimized_usable[0.5]}, and {optimized_usable[0.33]} agents at or above 1 tok/s/agent. Comfortable counts are {optimized_comfortable[1.0]}, {optimized_comfortable[0.5]}, and {optimized_comfortable[0.33]}. At every scale, 16 uniform-routed agents reach only {sensitivity_rows[0.33][concurrencies.index(16)].per_agent_tokens_per_second:.2f} tok/s/agent.",
+            "",
+            f"The hard purchase-planning answer is therefore no more than {primary_usable} minimally usable agents on the central 12-channel roofline, with {primary_comfortable} the safer interactive count. Because compute is assumed free, measured capacity can only be worse. The real measurement harness must replace the routing prior and zero-compute assumption before this becomes a measured capacity claim.",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -254,6 +328,15 @@ def build_json_report(
     return {
         "status": "modelled, not measured",
         "model": asdict(model),
+        "timing_decomposition": {
+            "formula": (
+                "(union_bytes+dense_bytes)/bandwidth + "
+                "B*per_token_compute"
+            ),
+            "dense_parameters_bf16": DEFAULT_DENSE_PARAMETERS,
+            "dense_bytes": DEFAULT_DENSE_BYTES,
+            "default_per_token_compute_seconds": 0.0,
+        },
         "scenarios": {
             scenario: {
                 hardware.key: {
@@ -261,6 +344,18 @@ def build_json_report(
                     "feasible": hardware.feasible,
                     "calibration": hardware.calibration,
                     "caveat": hardware.caveat,
+                    "old_batch1_tokens_per_second": (
+                        hardware.old_batch1_tokens_per_second
+                    ),
+                    "corrected_batch1_tokens_per_second": (
+                        hardware.predict(model, 1, prior).aggregate_tokens_per_second
+                    ),
+                    "dense_seconds_per_batch": (
+                        hardware.dense_bytes / 1e9 / hardware.routed_bandwidth_gb_s
+                    ),
+                    "per_token_compute_seconds": (
+                        hardware.per_token_compute_seconds
+                    ),
                     "rows": [
                         asdict(row)
                         for row in build_decision_rows(
@@ -274,6 +369,20 @@ def build_json_report(
                 for hardware in default_hardware_configs(model)
             }
             for scenario, prior in scenarios
+        },
+        "kernel_sensitivity_primary_uniform": {
+            str(scale): {
+                "rows": [
+                    asdict(row)
+                    for row in build_decision_rows(
+                        model=model,
+                        hardware=default_hardware_configs(model)[0],
+                        concurrencies=concurrencies,
+                        compute_scale=scale,
+                    )
+                ],
+            }
+            for scale in (1.0, 0.5, 0.33)
         },
     }
 

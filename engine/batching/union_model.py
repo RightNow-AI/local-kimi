@@ -1,4 +1,4 @@
-"""Analytic Kimi K3 expert-union and calibrated throughput model.
+"""Analytic Kimi K3 expert-union and physics-constrained throughput model.
 
 For one expert and one token, exact top-k routing selects that expert with
 probability k / n under independent uniform routing. Across B independently
@@ -20,7 +20,9 @@ q_i, with 0 <= q_i <= 1 and sum(q_i) = k. The corresponding expectation is
 
 Zipf and Dirichlet propensities are converted to valid inclusion probabilities
 with a Poissonized weighted-without-replacement approximation. This is a prior,
-not a claim about K3's measured router traffic.
+not a claim about K3's measured router traffic. Within this independent
+fixed-marginal family, concavity makes the uniform prior the upper bound on the
+expected union. Correlated real routing still requires generation traces.
 """
 
 from __future__ import annotations
@@ -34,6 +36,8 @@ from typing import Iterable, Sequence
 
 
 DEFAULT_CONCURRENCIES = (1, 2, 4, 8, 16, 32, 64, 128)
+DEFAULT_DENSE_PARAMETERS = 57_222_000_000
+DEFAULT_DENSE_BYTES = DEFAULT_DENSE_PARAMETERS * 2
 
 
 def _positive_integer(value: int, name: str) -> int:
@@ -74,7 +78,12 @@ class ThroughputPrediction:
     aggregate_tokens_per_second: float
     per_agent_tokens_per_second: float
     union_seconds_per_batch: float
-    non_union_seconds_per_batch: float
+    dense_seconds_per_batch: float
+    dense_seconds_per_token: float
+    weight_seconds_per_batch: float
+    token_compute_seconds_per_batch: float
+    token_compute_scale: float
+    total_seconds_per_batch: float
 
 
 @dataclass(frozen=True)
@@ -154,12 +163,14 @@ class ExpertUnionModel:
 
 @dataclass(frozen=True)
 class HardwareConfig:
-    """A bandwidth path plus a calibrated non-union token-time floor."""
+    """A routed transport plus explicit per-pass and per-token costs."""
 
     key: str
     label: str
     routed_bandwidth_gb_s: float
-    non_union_seconds_per_token: float
+    dense_bytes: int
+    per_token_compute_seconds: float
+    old_batch1_tokens_per_second: float
     calibration: str
     feasible: bool = True
     caveat: str = ""
@@ -167,8 +178,12 @@ class HardwareConfig:
     def __post_init__(self) -> None:
         if self.routed_bandwidth_gb_s <= 0.0:
             raise ValueError("routed_bandwidth_gb_s must be positive")
-        if self.non_union_seconds_per_token < 0.0:
-            raise ValueError("non_union_seconds_per_token cannot be negative")
+        if self.dense_bytes <= 0:
+            raise ValueError("dense_bytes must be positive")
+        if self.per_token_compute_seconds < 0.0:
+            raise ValueError("per_token_compute_seconds cannot be negative")
+        if self.old_batch1_tokens_per_second <= 0.0:
+            raise ValueError("old_batch1_tokens_per_second must be positive")
 
     @classmethod
     def calibrated_batch1(
@@ -179,48 +194,67 @@ class HardwareConfig:
         routed_bandwidth_gb_s: float,
         batch1_tokens_per_second: float,
         model: ExpertUnionModel,
+        dense_bytes: int = DEFAULT_DENSE_BYTES,
         calibration: str,
         feasible: bool = True,
         caveat: str = "",
     ) -> "HardwareConfig":
         if batch1_tokens_per_second <= 0.0:
             raise ValueError("batch1_tokens_per_second must be positive")
-        union_seconds = (
-            model.batch1_routed_traffic_bytes / 1e9 / routed_bandwidth_gb_s
-        )
-        residual = 1.0 / batch1_tokens_per_second - union_seconds
-        if residual < -1e-12:
+        routed_gb = model.batch1_routed_traffic_bytes / 1e9
+        dense_gb = dense_bytes / 1e9
+        weight_seconds = (routed_gb + dense_gb) / routed_bandwidth_gb_s
+        roofline_tokens_per_second = 1.0 / weight_seconds
+        requested_seconds = 1.0 / batch1_tokens_per_second
+        per_token_compute = requested_seconds - weight_seconds
+        if per_token_compute < -1e-12:
             raise ValueError(
-                "batch-1 calibration is faster than the routed-bandwidth roofline"
+                "physically impossible batch-1 calibration: "
+                f"requested={batch1_tokens_per_second:.6f} tok/s "
+                f"({requested_seconds:.6f} s/pass), true_weight_roofline="
+                f"{roofline_tokens_per_second:.6f} tok/s "
+                f"({weight_seconds:.6f} s/pass), routed={routed_gb:.9f} GB, "
+                f"dense={dense_gb:.9f} GB, bandwidth="
+                f"{routed_bandwidth_gb_s:.6f} GB/s"
             )
         return cls(
             key=key,
             label=label,
             routed_bandwidth_gb_s=routed_bandwidth_gb_s,
-            non_union_seconds_per_token=max(0.0, residual),
+            dense_bytes=dense_bytes,
+            per_token_compute_seconds=max(0.0, per_token_compute),
+            old_batch1_tokens_per_second=batch1_tokens_per_second,
             calibration=calibration,
             feasible=feasible,
             caveat=caveat,
         )
 
-    @property
-    def asymptotic_aggregate_tokens_per_second(self) -> float:
-        if self.non_union_seconds_per_token == 0.0:
-            return math.inf
-        return 1.0 / self.non_union_seconds_per_token
+    def batch1_weight_roofline_tokens_per_second(
+        self, model: ExpertUnionModel
+    ) -> float:
+        total_gb = (model.batch1_routed_traffic_bytes + self.dense_bytes) / 1e9
+        return self.routed_bandwidth_gb_s / total_gb
 
     def predict(
         self,
         model: ExpertUnionModel,
         concurrency: int,
         prior: RoutingPrior | None = None,
+        compute_scale: float = 1.0,
     ) -> ThroughputPrediction:
         concurrency = _positive_integer(concurrency, "concurrency")
+        if compute_scale <= 0.0 or not math.isfinite(compute_scale):
+            raise ValueError("compute_scale must be finite and positive")
         union = model.expected_union(concurrency, prior)
         batch_bytes = union * model.expert_bytes * model.moe_layers
         union_seconds = batch_bytes / 1e9 / self.routed_bandwidth_gb_s
-        non_union_seconds = concurrency * self.non_union_seconds_per_token
-        aggregate = concurrency / (union_seconds + non_union_seconds)
+        dense_seconds = self.dense_bytes / 1e9 / self.routed_bandwidth_gb_s
+        weight_seconds = union_seconds + dense_seconds
+        token_compute_seconds = (
+            concurrency * self.per_token_compute_seconds * compute_scale
+        )
+        total_seconds = weight_seconds + token_compute_seconds
+        aggregate = concurrency / total_seconds
         return ThroughputPrediction(
             concurrency=concurrency,
             expected_union=union,
@@ -229,7 +263,12 @@ class HardwareConfig:
             aggregate_tokens_per_second=aggregate,
             per_agent_tokens_per_second=aggregate / concurrency,
             union_seconds_per_batch=union_seconds,
-            non_union_seconds_per_batch=non_union_seconds,
+            dense_seconds_per_batch=dense_seconds,
+            dense_seconds_per_token=dense_seconds / concurrency,
+            weight_seconds_per_batch=weight_seconds,
+            token_compute_seconds_per_batch=token_compute_seconds,
+            token_compute_scale=compute_scale,
+            total_seconds_per_batch=total_seconds,
         )
 
 
@@ -319,52 +358,69 @@ def default_hardware_configs(
 ) -> tuple[HardwareConfig, ...]:
     """Central estimates for the hardware envelopes in the lane brief.
 
-    The 12-channel path is calibrated to the midpoint of the established
-    8.4-9.6 tok/s batch-1 range. The 8-channel path inherits the same 5090 and
-    non-union residual. PCIe is calibrated to the established 2.1 tok/s cap.
-    NVMe and impossible all-resident VRAM rows inherit the PCIe/GPU residual.
+    These are optimistic bandwidth-only rooflines. Every forward pass moves the
+    expected routed union plus 57.222B BF16 non-routed parameters on the stated
+    bandwidth path. Per-token compute is set to zero because the prior 9.0 and
+    2.1 tok/s anchors are physically impossible and cannot calibrate it.
     """
     model = model or ExpertUnionModel()
-    epyc_12 = HardwareConfig.calibrated_batch1(
+    epyc_12 = HardwareConfig(
         key="epyc-12ch-5090",
         label="12-channel DDR5-6000 EPYC + RTX 5090",
         routed_bandwidth_gb_s=450.0,
-        batch1_tokens_per_second=9.0,
-        model=model,
-        calibration="Modelled midpoint of measured 8.4-9.6 tok/s batch-1 v1",
-        caveat="450 GB/s is the midpoint of the stated 400-500 GB/s envelope",
+        dense_bytes=DEFAULT_DENSE_BYTES,
+        per_token_compute_seconds=0.0,
+        old_batch1_tokens_per_second=9.0,
+        calibration="Physics-derived bandwidth-only upper bound",
+        caveat=(
+            "450 GB/s is the midpoint of the stated 400-500 GB/s envelope; "
+            "real compute can only reduce throughput"
+        ),
     )
     epyc_8 = HardwareConfig(
         key="epyc-8ch-5090",
         label="8-channel DDR5-6000 EPYC + RTX 5090",
         routed_bandwidth_gb_s=350.0,
-        non_union_seconds_per_token=epyc_12.non_union_seconds_per_token,
-        calibration="Modelled with 12-channel residual; no batch measurement yet",
-        caveat="350 GB/s is the midpoint of the stated 300-400 GB/s envelope",
+        dense_bytes=DEFAULT_DENSE_BYTES,
+        per_token_compute_seconds=0.0,
+        old_batch1_tokens_per_second=7.8425,
+        calibration="Physics-derived bandwidth-only upper bound",
+        caveat=(
+            "350 GB/s is the midpoint of the stated 300-400 GB/s envelope; "
+            "real compute can only reduce throughput"
+        ),
     )
-    pcie = HardwareConfig.calibrated_batch1(
+    pcie = HardwareConfig(
         key="pcie5-stream-5090",
         label="PCIe 5.0 x16 expert streaming to RTX 5090",
         routed_bandwidth_gb_s=55.0,
-        batch1_tokens_per_second=2.1,
-        model=model,
-        calibration="Modelled curve calibrated to established near-2.1 tok/s batch-1 cap",
-        caveat="Streaming avoids VRAM capacity limits but is transfer-bound",
+        dense_bytes=DEFAULT_DENSE_BYTES,
+        per_token_compute_seconds=0.0,
+        old_batch1_tokens_per_second=2.1,
+        calibration="Physics-derived bandwidth-only upper bound",
+        caveat=(
+            "Treats routed and dense bytes on one 55 GB/s path as requested; "
+            "real topology and compute can only reduce this ceiling"
+        ),
     )
     nvme = HardwareConfig(
         key="nvme-gen5-stream",
         label="NVMe Gen5 expert streaming",
         routed_bandwidth_gb_s=14.0,
-        non_union_seconds_per_token=pcie.non_union_seconds_per_token,
-        calibration="Modelled from 14 GB/s roofline with PCIe/GPU residual",
+        dense_bytes=DEFAULT_DENSE_BYTES,
+        per_token_compute_seconds=0.0,
+        old_batch1_tokens_per_second=0.5267,
+        calibration="Physics-derived bandwidth-only upper bound",
         caveat="Optimistic ceiling before filesystem and page-cache overhead",
     )
     vram = HardwareConfig(
         key="rtx5090-resident-hypothetical",
         label="RTX 5090 VRAM-resident expert bank, hypothetical",
         routed_bandwidth_gb_s=1_790.0,
-        non_union_seconds_per_token=pcie.non_union_seconds_per_token,
-        calibration="Modelled 1.79 TB/s roofline with PCIe/GPU residual",
+        dense_bytes=DEFAULT_DENSE_BYTES,
+        per_token_compute_seconds=0.0,
+        old_batch1_tokens_per_second=14.6752,
+        calibration="Physics-derived bandwidth-only upper bound",
         feasible=False,
         caveat="Not buildable: 1,446.46 GB of experts cannot fit in 32 GiB VRAM",
     )
@@ -398,8 +454,16 @@ def _main() -> int:
                 "calibration": hardware.calibration,
                 "feasible": hardware.feasible,
                 "caveat": hardware.caveat,
-                "asymptotic_aggregate_tokens_per_second": (
-                    hardware.asymptotic_aggregate_tokens_per_second
+                "dense_bytes": hardware.dense_bytes,
+                "per_token_compute_seconds": hardware.per_token_compute_seconds,
+                "old_batch1_tokens_per_second": (
+                    hardware.old_batch1_tokens_per_second
+                ),
+                "corrected_batch1_tokens_per_second": (
+                    hardware.predict(model, 1, prior).aggregate_tokens_per_second
+                ),
+                "batch1_weight_roofline_tokens_per_second": (
+                    hardware.batch1_weight_roofline_tokens_per_second(model)
                 ),
                 "curve": [
                     asdict(hardware.predict(model, b, prior))
@@ -415,4 +479,3 @@ def _main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_main())
-
