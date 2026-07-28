@@ -45,6 +45,34 @@ the work that makes the difference between a research build and a sellable one:
 - or, on Blackwell, feed the packed MXFP4 weights to the tensor cores directly,
   since K3 ships in the OCP microscaling format the hardware consumes natively.
 
+### The real router is strongly skewed, not uniform
+
+Driving K3's actual learned router - `gate.weight` plus the `noaux_tc` correction
+bias, read from the checkpoint - with 4,096 isotropic hidden states matched to
+the rms observed in a real layer run:
+
+| layer | routing entropy | experts never selected | union at B=32 | union at B=128 |
+|---:|---:|---:|---:|---:|
+| 1 | 72.3% of uniform | 660 of 896 | **142** (uniform 393) | **175** (uniform 807) |
+| 12 | 65.7% | 717 | **100** (393) | **120** (807) |
+| 46 | 77.0% | 538 | 179 (393) | 239 (807) |
+| 92 | 77.6% | 471 | 181 (393) | 251 (807) |
+
+Across 65,536 draws a uniform router would leave essentially no expert unused.
+The real one leaves 471 to 717 of 896 untouched, and the batch union comes in
+**2.2x to 6.7x below** the uniform prediction. Since decode cost is set by
+distinct experts touched, that is a direct multiplier on aggregate throughput.
+
+**Both of these are bounds, and the truth is between them.** The uniform prior
+used in `engine/batching/` is a pessimistic upper bound on the union. This
+measurement is an optimistic lower bound, because isotropic inputs are not real
+hidden states: they probe the router's intrinsic bias rather than the spread
+that genuinely diverse text would produce. Only routing traces from the full
+model settle it, and neither number should be quoted alone.
+
+Skew also varies with depth - layer 12 is the most concentrated, the late layers
+the least - so a scheduler cannot assume one profile for the whole stack.
+
 ### There is no scatter penalty for MoE expert access
 
 Copying expert-sized blocks out of a DRAM-resident bank, same primitive and same
