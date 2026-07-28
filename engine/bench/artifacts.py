@@ -6,7 +6,6 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-
 IMMUTABLE_REVISION = re.compile(r"[0-9a-f]{40}")
 
 

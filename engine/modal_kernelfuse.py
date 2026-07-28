@@ -98,7 +98,6 @@ def validate_and_benchmark(
 
     import torch
     import torch.nn.functional as F
-
     from k3ref.dequant import dequantize_mxfp4
     from k3ref.weights import RawTensorStore
     from kernels.moe_grouped import mxfp4_expert_mlp
