@@ -1,6 +1,8 @@
 """Analytic and measured batching tools for Kimi K3."""
 
 from .union_model import (
+    DEFAULT_DENSE_BYTES,
+    DEFAULT_DENSE_PARAMETERS,
     ExpertUnionModel,
     HardwareConfig,
     RoutingPrior,
@@ -10,6 +12,8 @@ from .union_model import (
 )
 
 __all__ = [
+    "DEFAULT_DENSE_BYTES",
+    "DEFAULT_DENSE_PARAMETERS",
     "ExpertUnionModel",
     "HardwareConfig",
     "RoutingPrior",
@@ -17,4 +21,3 @@ __all__ = [
     "dirichlet_prior",
     "zipf_prior",
 ]
-
