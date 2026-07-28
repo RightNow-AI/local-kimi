@@ -43,8 +43,12 @@ jobs:
             **/pyproject.toml
             **/uv.lock
 
-      - name: Install locked project and development dependencies
-        run: uv sync --frozen --python ${{ matrix.python }}
+      # The engine extra carries torch and numpy. Without it the offline suite
+      # collects 20 import errors, because most of engine/ imports torch even in
+      # tests that never touch a GPU. The first CI run failed exactly this way on
+      # all 12 combinations, which is what CI is for.
+      - name: Install locked project, engine extra, and development dependencies
+        run: uv sync --frozen --extra engine --group dev --python ${{ matrix.python }}
 
       - name: Run complete offline suite
         run: >-
@@ -71,8 +75,8 @@ jobs:
             **/pyproject.toml
             **/uv.lock
 
-      - name: Install locked project and development dependencies
-        run: uv sync --frozen --python 3.13
+      - name: Install locked project, engine extra, and development dependencies
+        run: uv sync --frozen --extra engine --group dev --python 3.13
 
       - name: Run Ruff
         run: uv run --no-sync ruff check .
