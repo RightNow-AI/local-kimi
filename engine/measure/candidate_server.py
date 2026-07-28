@@ -89,13 +89,17 @@ def candidate_runtime_spec(
 def source_version() -> str:
     """Fingerprint the measure launcher and the engine sources it executes."""
 
-    engine_root = Path(__file__).resolve().parents[1]
-    paths = [Path(__file__).resolve()]
+    repository_root = Path(__file__).resolve().parents[2]
+    engine_root = repository_root / "engine"
+    paths = [
+        Path(__file__).resolve(),
+        repository_root / "k3" / "toolcalls.py",
+    ]
     for directory in (engine_root / "klinear", engine_root / "serve"):
         paths.extend(sorted(directory.rglob("*.py")))
     digest = hashlib.sha256()
     for path in sorted(set(paths)):
-        relative = path.relative_to(engine_root).as_posix().encode("utf-8")
+        relative = path.relative_to(repository_root).as_posix().encode("utf-8")
         payload = path.read_bytes()
         digest.update(len(relative).to_bytes(4, "big"))
         digest.update(relative)

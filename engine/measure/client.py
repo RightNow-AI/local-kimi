@@ -127,18 +127,42 @@ async def _measure_request(
         raise RequestFailure(
             f"{request_id} produced {output_tokens} tokens, expected {max_output_tokens}"
         )
-    if content_chunks != output_tokens:
-        raise RequestFailure(
-            f"{request_id} observed {content_chunks} content chunks for {output_tokens} tokens; "
-            "token-aligned streaming is required for inter-token latency"
-        )
 
     ttft_seconds = first_token_at - started
     token_span_seconds = last_token_at - first_token_at
     e2e_seconds = completed_at - started
-    inter_token_seconds = token_span_seconds / (output_tokens - 1)
-    if inter_token_seconds <= 0.0:
-        raise RequestFailure(f"{request_id} has a nonpositive inter-token interval")
+    token_aligned = content_chunks == output_tokens
+    interval_count = (output_tokens - 1) if token_aligned else (content_chunks - 1)
+    itl_exclusion_reason: str | None = None
+    if interval_count < 1:
+        itl_exclusion_reason = "fewer than two nonempty content chunks"
+    elif token_span_seconds <= 0.0:
+        itl_exclusion_reason = "nonpositive observed content-chunk span"
+
+    if itl_exclusion_reason is None:
+        inter_token_seconds: float | None = token_span_seconds / interval_count
+        per_stream_tokens_per_second: float | None = (
+            (output_tokens - 1) / token_span_seconds
+        )
+    else:
+        inter_token_seconds = None
+        per_stream_tokens_per_second = None
+
+    if token_aligned:
+        itl_basis = "token-aligned content-chunk intervals"
+        itl_arithmetic = (
+            "(last_token_offset_ms - first_token_offset_ms) / (output_tokens - 1)"
+        )
+    elif itl_exclusion_reason is None:
+        itl_basis = "observed content-chunk intervals"
+        itl_arithmetic = (
+            "(last_token_offset_ms - first_token_offset_ms) / "
+            "(content_chunk_count - 1)"
+        )
+    else:
+        itl_basis = "excluded"
+        itl_arithmetic = f"excluded: {itl_exclusion_reason}"
+
     return {
         "request_id": request_id,
         "prompt_id": prompt["id"],
@@ -150,20 +174,31 @@ async def _measure_request(
         "last_token_offset_ms": (last_token_at - batch_origin) * 1000.0,
         "completed_offset_ms": (completed_at - batch_origin) * 1000.0,
         "time_to_first_token_ms": ttft_seconds * 1000.0,
-        "inter_token_latency_ms": inter_token_seconds * 1000.0,
+        "inter_token_latency_ms": (
+            inter_token_seconds * 1000.0
+            if inter_token_seconds is not None
+            else None
+        ),
+        "inter_token_latency_approximate": not token_aligned,
+        "inter_token_latency_excluded": itl_exclusion_reason is not None,
+        "inter_token_latency_exclusion_reason": itl_exclusion_reason,
+        "inter_token_latency_basis": itl_basis,
+        "inter_token_interval_count": max(interval_count, 0),
         "end_to_end_latency_ms": e2e_seconds * 1000.0,
-        "output_tokens_per_second_per_stream": (output_tokens - 1) / token_span_seconds,
+        "output_tokens_per_second_per_stream": per_stream_tokens_per_second,
+        "output_tokens_per_second_per_stream_approximate": not token_aligned,
         "content_chunk_count": content_chunks,
+        "chunk_token_count_discrepancy": content_chunks - output_tokens,
         "response_id": response_id,
         "finish_reason": finish_reason,
         "arithmetic": {
             "time_to_first_token_ms": "first_token_offset_ms - request_started_offset_ms",
-            "inter_token_latency_ms": (
-                "(last_token_offset_ms - first_token_offset_ms) / (output_tokens - 1)"
-            ),
+            "inter_token_latency_ms": itl_arithmetic,
             "end_to_end_latency_ms": "completed_offset_ms - request_started_offset_ms",
             "output_tokens_per_second_per_stream": (
                 "(output_tokens - 1) / ((last_token_offset_ms - first_token_offset_ms) / 1000)"
+                if per_stream_tokens_per_second is not None
+                else f"excluded: {itl_exclusion_reason}"
             ),
         },
     }
@@ -231,27 +266,69 @@ async def _measure_batch(
 
 def _summarize_batches(batches: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     requests = [request for batch in batches for request in batch["requests"]]
+    inter_token_samples = [
+        request["inter_token_latency_ms"]
+        for request in requests
+        if request["inter_token_latency_ms"] is not None
+    ]
+    per_stream_samples = [
+        request["output_tokens_per_second_per_stream"]
+        for request in requests
+        if request["output_tokens_per_second_per_stream"] is not None
+    ]
+    inter_token_summary = _summarize_optional_series(inter_token_samples, unit="ms")
+    inter_token_summary.update(
+        {
+            "total_request_count": len(requests),
+            "excluded_sample_count": sum(
+                bool(request["inter_token_latency_excluded"])
+                for request in requests
+            ),
+            "approximate_sample_count": sum(
+                bool(request["inter_token_latency_approximate"])
+                and not bool(request["inter_token_latency_excluded"])
+                for request in requests
+            ),
+        }
+    )
+    per_stream_summary = _summarize_optional_series(
+        per_stream_samples,
+        unit="tokens/s",
+    )
+    per_stream_summary["excluded_sample_count"] = (
+        len(requests) - len(per_stream_samples)
+    )
     return {
         "time_to_first_token_ms": summarize_series(
             [request["time_to_first_token_ms"] for request in requests],
             unit="ms",
         ),
-        "inter_token_latency_ms": summarize_series(
-            [request["inter_token_latency_ms"] for request in requests],
-            unit="ms",
-        ),
+        "inter_token_latency_ms": inter_token_summary,
         "end_to_end_latency_ms": summarize_series(
             [request["end_to_end_latency_ms"] for request in requests],
             unit="ms",
         ),
-        "output_tokens_per_second_per_stream": summarize_series(
-            [request["output_tokens_per_second_per_stream"] for request in requests],
-            unit="tokens/s",
-        ),
+        "output_tokens_per_second_per_stream": per_stream_summary,
         "aggregate_output_tokens_per_second": summarize_series(
             [batch["aggregate_output_tokens_per_second"] for batch in batches],
             unit="tokens/s",
         ),
+    }
+
+
+def _summarize_optional_series(
+    values: Sequence[float],
+    *,
+    unit: str,
+) -> dict[str, Any]:
+    if values:
+        return summarize_series(values, unit=unit)
+    return {
+        "median": None,
+        "p95": None,
+        "sample_count": 0,
+        "unit": unit,
+        "percentile_method": "nearest-rank",
     }
 
 
