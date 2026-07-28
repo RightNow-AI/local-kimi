@@ -1,7 +1,26 @@
-"""Cross-expert rank of one Kimi K3 MoE layer, measured gauge-invariantly.
+"""WARNING: this script is diagnostic only and must not be cited as evidence.
 
-v1 of this script was WRONG in a way that would have produced a confident false
-negative. Three defects, all found by adversarial review and all fixed here:
+Its product-space statistic saturates near ``min(sketch**2, n)`` and therefore
+cannot distinguish no structure from a lossless 7x to 14x compression. Its
+1%, 3%, 5%, and 10% thresholds also sit below the checkpoint's measured
+approximately 16.46% product-space quantization noise floor. An exact rank-8
+bank reads as rank 64 in exact arithmetic and rank 643 after checkpoint
+quantization, so no GO or NO-GO verdict from this script is valid.
+
+A valid experiment must align hidden units and measure the rank of the factor
+stacks rather than their products. It must use participation ratio or an error
+threshold above the quantization floor, and first build a calibration curve so
+the statistic's power is known before reading any verdict from it.
+
+Only routed-expert matrices are MXFP4. Shared experts, attention, latent
+projections, and embeddings remain BF16 and total 114.4 GB; two shared experts
+participate alongside 16 routed experts per token.
+
+Historical context for the product-space experiment follows.
+
+v1 of this script was wrong in a way that would have produced a confident false
+negative. v2 attempted to address three defects, but those corrections do not
+rescue the uncalibrated product-space statistic:
 
 1. GAUGE. A SwiGLU expert computes  y = w2 @ (silu(w1 x) * (w3 x)).  Permuting the
    3072 hidden units - w1 -> P w1, w3 -> P w3, w2 -> w2 P^T - leaves the expert's
@@ -17,31 +36,37 @@ negative. Three defects, all found by adversarial review and all fixed here:
    is sqrt(0.05) = 22.4% relative Frobenius error, not 5%. We report the rank needed
    to hit a stated RECONSTRUCTION ERROR, which is the quantity the product depends on.
 
-3. MEAN. A large component shared by every expert makes any stack look rank-1. We
-   report both centred and uncentred, and the centred number is the one that decides.
+3. MEAN. A large component shared by every expert makes any stack look rank-1. The
+   script reports both centred and uncentred results for diagnostic comparison.
 
-A POSITIVE CONTROL runs through the identical pipeline: a synthetic stack of known
-rank 8. If the pipeline cannot recover rank 8 from that, the measurement is blind and
-no conclusion may be drawn from it.
+The synthetic rank-8 control enters only at the final reporting stage. It checks
+the eigenspectrum reporter, not dequantization, factor products, sketching, or the
+statistic's power on checkpoint data, so it cannot validate a verdict.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import struct
+import sys
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+import torch
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+dequantize_mxfp4 = importlib.import_module(
+    "engine.k3ref.dequant"
+).dequantize_mxfp4
 
 BASE = "https://huggingface.co/moonshotai/Kimi-K3/resolve/main"
-E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
-E2M1_FULL = np.concatenate([E2M1, -E2M1])
-
-
 def http(url: str, rng: tuple[int, int] | None = None, retries: int = 5) -> bytes:
     headers = {"User-Agent": "k3-spectrum"}
     if rng:
@@ -59,28 +84,44 @@ def http(url: str, rng: tuple[int, int] | None = None, retries: int = 5) -> byte
 
 
 def dequant(packed: np.ndarray, scale: np.ndarray) -> np.ndarray:
-    cols = packed.shape[1] * 2
-    vals = np.empty((packed.shape[0], cols), dtype=np.uint8)
-    vals[:, 0::2] = packed & 0x0F
-    vals[:, 1::2] = packed >> 4
-    w = E2M1_FULL[vals]
-    exp = np.exp2(scale.astype(np.int16) - 127).astype(np.float32)
-    return w * np.repeat(exp, cols // scale.shape[1], axis=1)
+    """NumPy adapter around the canonical PyTorch MXFP4 codec."""
+    packed_tensor = torch.tensor(packed, dtype=torch.uint8)
+    scale_tensor = torch.tensor(scale, dtype=torch.uint8)
+    return dequantize_mxfp4(packed_tensor, scale_tensor).cpu().numpy()
+
+
+def raw_cache_path(cache: Path, tensor_name: str) -> Path:
+    return cache / (tensor_name.replace(".", "_") + ".npy")
 
 
 def get_tensor(shard: str, header: dict, start: int, name: str, cache: Path) -> np.ndarray:
     out = cache / (name.replace(".", "_") + ".npy")
+    parts = {}
+    for suffix in ("weight_packed", "weight_scale"):
+        tensor_name = f"{name}.{suffix}"
+        cached = raw_cache_path(cache, tensor_name)
+        if cached.exists():
+            parts[suffix] = np.load(cached)
+            continue
+        meta = header[tensor_name]
+        a, b = meta["data_offsets"]
+        raw = http(f"{BASE}/{shard}", (start + a, start + b - 1))
+        parts[suffix] = np.frombuffer(raw, dtype=np.uint8).reshape(meta["shape"])
+        np.save(cached, parts[suffix])
+
+    min_scale_byte = int(parts["weight_scale"].min())
+    # FP16's smallest nonzero value is 2^-24. With E2M1's 0.5 minimum,
+    # scale bytes below 104 can silently flush decoded nonzero weights to zero.
+    assert min_scale_byte >= 104, (
+        f"MXFP4 scale byte {min_scale_byte} is unsafe for the fp16 cache; "
+        "keep the dequantized tensor in float32"
+    )
+
     if out.exists():
         try:
             return np.load(out)
         except Exception:
             out.unlink(missing_ok=True)
-    parts = {}
-    for suffix in ("weight_packed", "weight_scale"):
-        meta = header[f"{name}.{suffix}"]
-        a, b = meta["data_offsets"]
-        raw = http(f"{BASE}/{shard}", (start + a, start + b - 1))
-        parts[suffix] = np.frombuffer(raw, dtype=np.uint8).reshape(meta["shape"])
     w = dequant(parts["weight_packed"], parts["weight_scale"]).astype(np.float16)
     np.save(out, w)
     return w
@@ -163,7 +204,7 @@ def main() -> int:
     S3 = np.stack(S3)
     print(f"\nsketches: {S1.shape} each\n")
     print("RANK NEEDED FOR A GIVEN RELATIVE FROBENIUS RECONSTRUCTION ERROR")
-    print("(the CENTRED row is the one that decides the thesis)\n")
+    print("(diagnostic output only; no row supports a compression verdict)\n")
 
     results = {
         "M1_w2w1": report("M1 = w2@w1", S1),
@@ -175,8 +216,7 @@ def main() -> int:
     ctrl = rng.standard_normal((n, d), dtype=np.float32)
     results["negative_control"] = report("random control", ctrl)
 
-    # Positive control: a stack that genuinely has rank 8. If the pipeline cannot
-    # see this, it cannot see anything and no conclusion may be drawn.
+    # This checks only the final eigenspectrum reporter, not the upstream pipeline.
     basis = rng.standard_normal((8, d), dtype=np.float32)
     coef = rng.standard_normal((n, 8), dtype=np.float32)
     results["positive_control_rank8"] = report("synthetic rank-8", coef @ basis)
@@ -184,28 +224,12 @@ def main() -> int:
     out = Path(args.cache) / f"spectrum_v2_layer{args.layer}.json"
     out.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
-    c = results["M1_w2w1"]["CENTRED"]["ranks"]
-    pos = results["positive_control_rank8"]["CENTRED"]["ranks"]["1%"]
-    neg = results["negative_control"]["CENTRED"]["ranks"]["5%"]
     print("\n" + "=" * 68)
-    print("VERDICT")
+    print("WARNING: NO GO/NO-GO VERDICT")
     print("=" * 68)
-    if pos > 12:
-        print(f"  MEASUREMENT IS BLIND: positive control needs r={pos} for 1% error,")
-        print("  but it is rank 8 by construction. Do not draw a conclusion.")
-        return 2
-    print(f"  pipeline validated: synthetic rank-8 recovered at r={pos} (1% error)")
-    print(f"  random control needs r={neg} for 5% error out of n={n}")
-    print(f"  K3 experts (centred, w2@w1) need r={c['5%']} for 5% error, r={c['1%']} for 1%")
-    print()
-    if c["5%"] <= 16:
-        print(f"  GO. r={c['5%']} <= 16 = num_experts_per_token, so a shared basis beats")
-        print("  plain top-16 routing on bandwidth AND makes the bank resident.")
-    elif c["5%"] <= 64:
-        print(f"  PARTIAL. r={c['5%']} is well below n={n} so real structure exists, but it is")
-        print("  above the 16 break-even: this buys capacity, not per-token bandwidth.")
-    else:
-        print(f"  NO-GO on this route. r={c['5%']} is too high; pivot to pruning/clustering.")
+    print("  Product-space ranks are retained only as diagnostics.")
+    print("  The statistic is uncalibrated below the checkpoint quantization floor.")
+    print("  Do not cite this output as compression evidence or a routing decision.")
     return 0
 
 

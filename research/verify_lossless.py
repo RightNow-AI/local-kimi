@@ -1,126 +1,316 @@
-"""Prove the MXFP4 unpack is bit-exact, rather than asserting it.
+"""Verify the canonical MXFP4 decoder against an independent implementation.
 
-Moonshot ships K3's expert mass already 4-bit. That makes their release the
-reference, so the only thing standing between us and a zero-loss baseline is
-whether our unpack reproduces their values exactly. This is provable, not
-merely measurable: every dequantized value must be code * 2^(exp-127) for a
-code in the E2M1 table, and re-encoding must reproduce the original bytes
-nibble for nibble.
+Only K3's routed-expert matrices are MXFP4. Shared experts, attention, latent
+projections, and embeddings remain BF16 and total 114.4 GB; two shared experts
+participate alongside 16 routed experts per token.
 
-Runs against the tensors already cached locally by research/expert_spectrum*.py.
+This script reads raw ``weight_packed`` and ``weight_scale`` arrays cached by
+``research/expert_spectrum*.py``. It compares the canonical codec in
+``engine/k3ref/dequant.py`` with ``compressed-tensors`` using float32 bit
+patterns, so the sign of negative zero is part of the assertion. It also runs
+three deliberately wrong decoders and refuses to pass unless all are rejected.
+
+If ``compressed-tensors`` is unavailable, the script exits 77 with a loud SKIP
+instead of substituting its own logic or reporting success.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import struct
-import urllib.request
+import importlib
+import importlib.metadata
+import re
+import sys
+from functools import lru_cache
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
+import torch
 
-BASE = "https://huggingface.co/moonshotai/Kimi-K3/resolve/main"
-E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
-E2M1_FULL = np.concatenate([E2M1, -E2M1])
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+dequantize_mxfp4 = importlib.import_module(
+    "engine.k3ref.dequant"
+).dequantize_mxfp4
+
+Decoder = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
-def http(url: str, rng=None) -> bytes:
-    h = {"User-Agent": "k3-verify"}
-    if rng:
-        h["Range"] = f"bytes={rng[0]}-{rng[1]}"
-    return urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=180).read()
+class ReferenceUnavailable(RuntimeError):
+    """The independent compressed-tensors reference cannot be loaded."""
+
+
+class DecoderMismatch(AssertionError):
+    """A decoder disagrees with the independent reference at the bit level."""
+
+
+@lru_cache(maxsize=1)
+def _load_reference_api() -> tuple[str, object, object, object, object, object, object]:
+    try:
+        version = importlib.metadata.version("compressed-tensors")
+        helpers = importlib.import_module(
+            "compressed_tensors.compressors.nvfp4.helpers"
+        )
+        mx_utils = importlib.import_module("compressed_tensors.compressors.mx_utils")
+        forward_helpers = importlib.import_module(
+            "compressed_tensors.quantization.lifecycle.forward_helpers"
+        )
+        quantization = importlib.import_module("compressed_tensors.quantization")
+        return (
+            version,
+            helpers.unpack_fp4_from_uint8,
+            mx_utils.decompress_mx_scale,
+            forward_helpers._process_group,
+            quantization.QuantizationArgs,
+            quantization.QuantizationStrategy,
+            quantization.QuantizationType,
+        )
+    except (ImportError, AttributeError, importlib.metadata.PackageNotFoundError) as exc:
+        raise ReferenceUnavailable(
+            "compressed-tensors with the MXFP4 reference API is required"
+        ) from exc
+
+
+def compressed_tensors_dequantize(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    """Decode through the compressed-tensors reference API used by version 0.17.1."""
+    (
+        _version,
+        unpack_fp4_from_uint8,
+        decompress_mx_scale,
+        process_group,
+        QuantizationArgs,
+        QuantizationStrategy,
+        QuantizationType,
+    ) = _load_reference_api()
+
+    rows, packed_columns = packed.shape
+    unpacked = unpack_fp4_from_uint8(
+        packed,
+        rows,
+        packed_columns * 2,
+        dtype=torch.float32,
+    )
+    scale_float = decompress_mx_scale(scale).to(torch.float32)
+    args = QuantizationArgs(
+        num_bits=4,
+        type=QuantizationType.FLOAT,
+        symmetric=True,
+        strategy=QuantizationStrategy.GROUP,
+        group_size=32,
+    )
+    return process_group(
+        x=unpacked,
+        scale=scale_float,
+        zero_point=None,
+        args=args,
+        q_min=torch.tensor(-6.0, device=packed.device),
+        q_max=torch.tensor(6.0, device=packed.device),
+        dtype=torch.float32,
+        do_quantize=False,
+        do_dequantize=True,
+        g_idx=None,
+        global_scale=None,
+    ).to(torch.float32)
+
+
+def _float32_bits(values: torch.Tensor) -> torch.Tensor:
+    if values.dtype != torch.float32:
+        raise TypeError(f"bit-exact verification requires float32, got {values.dtype}")
+    return values.detach().contiguous().cpu().view(torch.int32)
+
+
+def assert_decoder_matches_reference(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    decoder: Decoder = dequantize_mxfp4,
+    label: str = "canonical decoder",
+) -> torch.Tensor:
+    """Assert exact float32 bits, including the sign bit on zero values."""
+    actual = decoder(packed, scale)
+    if actual.shape != reference.shape:
+        raise DecoderMismatch(
+            f"{label} returned shape {tuple(actual.shape)}, expected {tuple(reference.shape)}"
+        )
+
+    actual_bits = _float32_bits(actual)
+    reference_bits = _float32_bits(reference)
+    mismatches = actual_bits != reference_bits
+    if bool(mismatches.any()):
+        flat_index = int(torch.nonzero(mismatches.flatten(), as_tuple=False)[0].item())
+        columns = reference.shape[1]
+        row, column = divmod(flat_index, columns)
+        actual_value = float(actual[row, column].item())
+        reference_value = float(reference[row, column].item())
+        actual_bit_pattern = int(actual_bits[row, column].item()) & 0xFFFFFFFF
+        reference_bit_pattern = int(reference_bits[row, column].item()) & 0xFFFFFFFF
+        raise DecoderMismatch(
+            f"{label} differs at [{row}, {column}]: "
+            f"actual={actual_value} bits=0x{actual_bit_pattern:08x}, "
+            f"reference={reference_value} bits=0x{reference_bit_pattern:08x}"
+        )
+    return actual
+
+
+def _swapped_nibble_decoder(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    swapped = ((packed & 0x0F) << 4) | (packed >> 4)
+    return dequantize_mxfp4(swapped, scale)
+
+
+def _shuffled_codebook_decoder(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    mapping = torch.tensor(
+        [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14],
+        dtype=torch.long,
+        device=packed.device,
+    )
+    low = mapping[(packed & 0x0F).long()]
+    high = mapping[(packed >> 4).long()]
+    remapped = (low | (high << 4)).to(torch.uint8)
+    return dequantize_mxfp4(remapped, scale)
+
+
+def _bias_120_decoder(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    # Bias 120 makes every nonzero decoded value 2^(127-120) times too large.
+    return dequantize_mxfp4(packed, scale) * 128.0
+
+
+NEGATIVE_CONTROLS: tuple[tuple[str, Decoder], ...] = (
+    ("swapped nibble order", _swapped_nibble_decoder),
+    ("shuffled code table", _shuffled_codebook_decoder),
+    ("exponent bias 120", _bias_120_decoder),
+)
+
+
+def assert_negative_controls_rejected(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    reference: torch.Tensor,
+) -> tuple[str, ...]:
+    """Fail if any deliberately corrupted decoder escapes detection."""
+    rejected = []
+    for label, decoder in NEGATIVE_CONTROLS:
+        try:
+            assert_decoder_matches_reference(
+                packed,
+                scale,
+                reference,
+                decoder=decoder,
+                label=label,
+            )
+        except DecoderMismatch:
+            rejected.append(label)
+        else:
+            raise AssertionError(f"verification accepted wrong decoder: {label}")
+    return tuple(rejected)
+
+
+def cached_tensor_pairs(
+    cache: Path,
+    *,
+    layer: int,
+    experts: int,
+) -> list[tuple[Path, Path]]:
+    """Find raw packed/scale cache pairs written by the spectrum scripts."""
+    layer_marker = f"_layers_{layer}_"
+    pairs = []
+    for packed_path in sorted(cache.glob("*_weight_packed.npy")):
+        if layer_marker not in packed_path.name:
+            continue
+        match = re.search(r"_experts_(\d+)_", packed_path.name)
+        if match is None or (experts > 0 and int(match.group(1)) >= experts):
+            continue
+        scale_path = packed_path.with_name(
+            packed_path.name.replace("_weight_packed.npy", "_weight_scale.npy")
+        )
+        if not scale_path.is_file():
+            raise FileNotFoundError(f"missing scale cache for {packed_path.name}")
+        pairs.append((packed_path, scale_path))
+    return pairs
+
+
+def _load_uint8(path: Path) -> torch.Tensor:
+    array = np.load(path, allow_pickle=False)
+    if array.dtype != np.uint8:
+        raise TypeError(f"{path} must contain uint8 data, got {array.dtype}")
+    return torch.from_numpy(np.array(array, copy=True))
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--layer", type=int, default=12)
-    ap.add_argument("--experts", type=int, default=32)
-    ap.add_argument("--cache", default="research/.cache")
-    args = ap.parse_args()
-    cache = Path(args.cache)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--layer", type=int, default=12)
+    parser.add_argument("--experts", type=int, default=32)
+    parser.add_argument("--cache", type=Path, default=Path("research/.cache"))
+    args = parser.parse_args()
 
-    wm = json.loads((cache / "model.safetensors.index.json").read_text(encoding="utf-8"))["weight_map"]
-    stem = f"language_model.model.layers.{args.layer}.block_sparse_moe.experts"
-    shard = wm[f"{stem}.0.w1.weight_packed"]
-    hd = json.loads((cache / f"{shard}.header.json").read_text(encoding="utf-8"))
-    header, start = hd["header"], hd["data_start"]
+    try:
+        reference_version = _load_reference_api()[0]
+    except ReferenceUnavailable as exc:
+        print(f"SKIP: {exc}. Install compressed-tensors; no verification was run.")
+        return 77
+
+    try:
+        pairs = cached_tensor_pairs(
+            args.cache,
+            layer=args.layer,
+            experts=args.experts,
+        )
+    except (FileNotFoundError, TypeError) as exc:
+        print(f"FAIL: invalid MXFP4 cache: {exc}")
+        return 2
+    if not pairs:
+        print(
+            "FAIL: no raw weight_packed/weight_scale cache pairs found. "
+            "Run a spectrum script to populate research/.cache first."
+        )
+        return 2
 
     checked = 0
-    total_elems = 0
-    code_hist = np.zeros(16, dtype=np.int64)
-    exp_lo, exp_hi = 255, 0
+    total_values = 0
+    negative_zeros = 0
+    rejected_controls: tuple[str, ...] | None = None
+    for packed_path, scale_path in pairs:
+        try:
+            packed = _load_uint8(packed_path)
+            scale = _load_uint8(scale_path)
+            reference = compressed_tensors_dequantize(packed, scale)
+            assert_decoder_matches_reference(packed, scale, reference)
+            if rejected_controls is None:
+                rejected_controls = assert_negative_controls_rejected(
+                    packed,
+                    scale,
+                    reference,
+                )
+        except (AssertionError, RuntimeError, TypeError, ValueError) as exc:
+            print(f"FAIL: {packed_path.name}: {exc}")
+            return 1
 
-    for e in range(args.experts):
-        for proj in ("w1", "w2", "w3"):
-            name = f"{stem}.{e}.{proj}"
-            raw = {}
-            for suffix in ("weight_packed", "weight_scale"):
-                meta = header[f"{name}.{suffix}"]
-                a, b = meta["data_offsets"]
-                blob = http(f"{BASE}/{shard}", (start + a, start + b - 1))
-                raw[suffix] = np.frombuffer(blob, dtype=np.uint8).reshape(meta["shape"])
+        negative_zeros += int(((reference == 0) & torch.signbit(reference)).sum().item())
+        total_values += reference.numel()
+        checked += 1
 
-            packed, scale = raw["weight_packed"], raw["weight_scale"]
-            cols = packed.shape[1] * 2
+    if negative_zeros == 0:
+        print("FAIL: cached sample contained no negative-zero codes to verify")
+        return 1
 
-            # forward: unpack
-            codes = np.empty((packed.shape[0], cols), dtype=np.uint8)
-            codes[:, 0::2] = packed & 0x0F
-            codes[:, 1::2] = packed >> 4
-            exp = np.exp2(scale.astype(np.int16) - 127).astype(np.float32)
-            w = E2M1_FULL[codes] * np.repeat(exp, cols // scale.shape[1], axis=1)
-
-            # inverse: recover the code from the value and re-pack
-            back = w / np.repeat(exp, cols // scale.shape[1], axis=1)
-            # exact table lookup: every value must equal a table entry exactly
-            idx = np.abs(back[:, :, None] - E2M1_FULL[None, None, :]).argmin(axis=2)
-            exact = np.array_equal(E2M1_FULL[idx], back)
-            recon = np.empty_like(packed)
-            recon = (idx[:, 0::2] | (idx[:, 1::2] << 4)).astype(np.uint8)
-
-            if not exact:
-                print(f"  FAIL {name}: dequantized values are not exact table entries")
-                return 1
-            # Codes 0 and 8 both encode zero (+0 and -0), so the encoding of a
-            # zero weight is genuinely ambiguous and a round trip may pick either.
-            # Canonicalise before comparing; the VALUES are what must be exact.
-            def canon(nib: np.ndarray) -> np.ndarray:
-                return np.where(nib == 8, 0, nib)
-
-            orig_nib = np.empty((packed.shape[0], cols), dtype=np.uint8)
-            orig_nib[:, 0::2] = packed & 0x0F
-            orig_nib[:, 1::2] = packed >> 4
-            if not np.array_equal(canon(idx.astype(np.uint8)), canon(orig_nib)):
-                bad = int((canon(idx.astype(np.uint8)) != canon(orig_nib)).sum())
-                print(f"  FAIL {name}: re-pack differs in {bad} nibbles beyond +/-0 aliasing")
-                return 1
-            neg_zero = int((orig_nib == 8).sum())
-
-            code_hist += np.bincount(codes.ravel(), minlength=16)
-            exp_lo = min(exp_lo, int(scale.min()))
-            exp_hi = max(exp_hi, int(scale.max()))
-            total_elems += codes.size
-            checked += 1
-
-        if (e + 1) % 8 == 0:
-            print(f"  {e+1}/{args.experts} experts verified bit-exact", flush=True)
-
-    print(f"\n=== PROVEN over {checked} tensors, {total_elems/1e6:.1f}M weights ===")
-    print("  every dequantized value is exactly an E2M1 code times 2^(exp-127)")
-    print("  re-packing reproduces the original bytes nibble for nibble")
-    print(f"  loss versus Moonshot's published weights: 0 (bit-exact)\n")
-
-    print("=== format utilisation (is the 4-bit budget actually used?) ===")
-    labels = [f"+{v:g}" for v in E2M1] + [f"-{v:g}" for v in E2M1]
-    for i in np.argsort(-code_hist):
-        pct = 100 * code_hist[i] / total_elems
-        print(f"  code {i:2d} = {labels[i]:>5s}  {pct:5.2f}%")
-    used = int((code_hist > 0).sum())
-    print(f"\n  codes in use: {used}/16    E8M0 exponent range: {exp_lo}..{exp_hi} "
-          f"(scale 2^{exp_lo-127}..2^{exp_hi-127})")
-    zero = 100 * (code_hist[0] + code_hist[8]) / total_elems
-    print(f"  zeros: {zero:.2f}%  (two of sixteen codes encode zero)")
+    print(f"VERIFIED: {checked} cached routed-expert tensors, {total_values} values")
+    print(f"  canonical decoder matches compressed-tensors {reference_version} bit for bit")
+    print(f"  negative-zero sign bits compared: {negative_zeros}")
+    print(f"  wrong decoders rejected: {', '.join(rejected_controls or ())}")
     return 0
 
 
