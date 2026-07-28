@@ -1,4 +1,78 @@
-# k3
+# local-kimi
+
+Running Kimi K3 locally: a serving proxy that speaks every coding agent's wire
+format, and the engine research behind actually executing a 2.78T-parameter
+model on hardware you can own.
+
+Two halves:
+
+| | |
+|---|---|
+| **`k3/`** | The proxy. Auto-detects Claude Code / Codex / OpenAI clients and speaks each one's dialect. Working, tested, and [deployed](#live-endpoint). |
+| **`engine/`, `research/`** | The engine. Reference implementation, weight access, and the measurements that decide what is buildable. Early. |
+
+## Live endpoint
+
+```
+https://rightnow-ai--k3-serve-api.modal.run
+```
+
+Deployed on Modal, token-gated. Verified end to end against the real `claude`
+CLI and the real `codex` CLI over the internet, plus the official `openai`
+Python SDK: all three dialects, auth enforced, streaming, and the reasoning
+signature round-tripping. See `engine/modal_serve.py`.
+
+## What is actually established about Kimi K3
+
+Every number here was read from the checkpoint this session, not assumed:
+
+| | |
+|---|---|
+| Size | 2.78T params, 1,560.9 GB, 96 shards, 497,220 tensors |
+| Layers | 93 — layer 0 dense, 1–92 MoE |
+| Experts | 896 per layer, **16 routed + 2 shared** active per token |
+| MoE shape | **latent**: 7168 → 3584 → per-expert → 7168, each expert 33,030,144 params |
+| Expert format | already 4-bit — `weight_packed` U8 + `weight_scale` U8, group 32, **exactly 4.250 bits/param** |
+| The rest | BF16 — attention, shared experts, latent projections, embeddings: **114.4 GB** |
+| Attention | hybrid — 24 MLA layers, **69 KDA linear-attention** layers, 1M context |
+| Activation | `situ`, **not** SwiGLU (`activation_situ_linear_beta` 25.0) |
+| Prompt format | XTML (`<\|open\|>` / `<\|close\|>` / `<\|sep\|>`), **not** the K2 control tokens |
+
+Two consequences worth stating plainly:
+
+**Moonshot ships K3 already quantized, so their release is the reference.** There
+is no higher-precision K3 to lose ground against. Reading it losslessly costs
+nothing; the loss ledger starts only when we change something.
+
+**"K3 is 4-bit" is over-stated.** Only the *routed* experts are. 2 of the 18
+experts active per token are the BF16 shared experts.
+
+## Status, honestly
+
+This project has an adversarial verification pass (`wf_9f96ac7d-99b`) that
+attacked its own load-bearing claims. Three of four failed. What that changed:
+
+- **Performance numbers are under revision.** An earlier figure of 8.4–9.6 tok/s
+  for batch-1 decode was refuted: it implies the 114.4 GB of BF16 dense weights
+  move at 3.6× theoretical peak DRAM. The corrected figure is closer to
+  ~3.3 tok/s. **Do not price hardware off the old number.**
+- **`research/verify_lossless.py` proves nothing.** It multiplies and divides by
+  the same power of two, so its check is a tautology that returns PROVEN for a
+  swapped nibble order. The *conclusion* survives on independent evidence (two
+  ports of `compressed-tensors` agreeing bit-identically on real bytes); the
+  script does not.
+- **`research/expert_spectrum_v2.py`'s verdict must not be cited.** Its statistic
+  saturates at ≈ min(sketch², n) and its thresholds sit below the checkpoint's
+  own ~16% quantization noise floor. The decision it reached — that a global
+  shared-basis low-rank codec is not worth pursuing — still stands, but on
+  participation-ratio evidence, not on that script.
+
+Nothing above was found by a customer. It was found by pointing agents at our
+own work and asking them to break it.
+
+---
+
+# k3 — the proxy
 
 Client presets for the K3 inference engine.
 
