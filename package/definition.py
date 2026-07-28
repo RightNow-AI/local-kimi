@@ -221,6 +221,35 @@ class PackageDefinition(BaseModel):
         return self
 
 
+#: A results document that has been overtaken by later work says so in its own
+#: text. Building a package from one is how a stale number reaches a customer.
+SUPERSEDED_MARKER = "SUPERSEDED"
+
+
+def _refuse_superseded_evidence(results_path: Path) -> None:
+    """Refuse a results document that declares its own figures superseded.
+
+    This is not hypothetical. `engine/laptop/RESULTS.md` projected INT4 weights
+    at 24,561,340,864 bytes from flat 4.0-bit arithmetic. The artifact that was
+    actually built measures 28,803,304,448, because the codec costs 4.5 bits per
+    quantized parameter once BF16 group scales are counted and several
+    quality-sensitive classes are deliberately left in source precision. That
+    file now carries a superseded banner, and this refuses to read past it, so
+    the correction cannot be silently undone by a caller passing the old path.
+    """
+    try:
+        text = results_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"structural results are unreadable at {results_path}: {exc}") from exc
+    if SUPERSEDED_MARKER in text:
+        raise ValueError(
+            f"{results_path} declares its figures superseded and cannot back a "
+            "package claim. Point at the measured artifact results instead, "
+            "engine/quant/QUANTIZATION-RESULTS.md, which records "
+            "28,803,304,448 bytes read from the built checkpoint."
+        )
+
+
 def build_kimi_linear_definition(
     *,
     base_revision: str,
@@ -230,6 +259,8 @@ def build_kimi_linear_definition(
     measured_claims: tuple[Claim, ...] = (),
 ) -> PackageDefinition:
     """Build the Kimi definition by reading structural values from RESULTS.md."""
+
+    _refuse_superseded_evidence(results_path)
 
     memory_evidence = EvidenceReference(
         path=results_path,
