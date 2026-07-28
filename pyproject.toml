@@ -18,7 +18,9 @@ classifiers = [
     "Environment :: Console",
     "Framework :: FastAPI",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -67,7 +69,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["k3"]
+# engine ships alongside k3. Without it the wheel contained only the proxy, so
+# an installed copy of this project could not import engine.serve, which is the
+# server the project is named for. The tests pass either way because they run
+# from the repo root, which is exactly why this went unnoticed.
+packages = ["k3", "engine"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

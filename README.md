@@ -1,333 +1,142 @@
 # local-kimi
 
-Running Kimi K3 locally: a serving proxy that speaks every coding agent's wire
-format, and the engine research behind actually executing a 2.78T-parameter
-model on hardware you can own.
+`local-kimi` contains two related pieces of work:
 
-Two halves:
+- `k3/` is a local protocol adapter for sending Anthropic Messages, OpenAI Chat
+  Completions, and OpenAI Responses requests to a Kimi K3 endpoint.
+- `engine/` and `research/` contain reference implementations, measurement
+  tools, and models used to investigate local Kimi serving.
 
-| | |
-|---|---|
-| **`k3/`** | The proxy. Auto-detects Claude Code / Codex / OpenAI clients and speaks each one's dialect. Working, tested, and [deployed](#live-endpoint). |
-| **`engine/`, `research/`** | The engine. Reference implementation, weight access, and the measurements that decide what is buildable. Early. |
+The proxy is alpha software. The engine work is research code, not a complete
+or production-qualified Kimi K3 serving engine.
 
-## Live endpoint
+## Current evidence boundary
 
-```
-https://rightnow-ai--k3-serve-api.modal.run
-```
+- There is no measured full-model Kimi K3 throughput result in this repository.
+- There is no measured comparison with vLLM or any other serving engine.
+- The Kimi-Linear benchmark report is currently marked `UNMEASURED`.
+- Laptop throughput values are projections from a bandwidth model, not laptop
+  measurements.
+- Routing-aware batch composition has an implementation, but the checked-in
+  result file says its simulation was not executed and claims no win.
 
-Deployed on Modal, token-gated. Verified end to end against the real `claude`
-CLI and the real `codex` CLI over the internet, plus the official `openai`
-Python SDK: all three dialects, auth enforced, streaming, and the reasoning
-signature round-tripping. See `engine/modal_serve.py`.
+The source of each statement is linked below. A projection or model output is
+not presented as a measurement.
 
-## What is actually established about Kimi K3
+## Repository layout
 
-Every number here was read from the checkpoint this session, not assumed:
+| Path | Purpose |
+| --- | --- |
+| `k3/` | Protocol detection, request translation, streaming translation, tool parsing, reasoning preservation, recording, and replay |
+| `tests/` | Offline unit, regression, conformance, and protocol tests |
+| `engine/` | Kimi K3 and Kimi-Linear reference work, measurement code, and analytic models |
+| `research/` | Exploratory scripts whose conclusions require the evidence stated in each file |
+| `reference/` | Third-party Moonshot reference material used as a test oracle, under separate upstream terms |
 
-| | |
-|---|---|
-| Size | 2.78T params, 1,560.9 GB, 96 shards, 497,220 tensors |
-| Layers | 93 — layer 0 dense, 1–92 MoE |
-| Experts | 896 per layer, **16 routed + 2 shared** active per token |
-| MoE shape | **latent**: 7168 → 3584 → per-expert → 7168, each expert 33,030,144 params |
-| Expert format | already 4-bit — `weight_packed` U8 + `weight_scale` U8, group 32, **exactly 4.250 bits/param** |
-| The rest | BF16 — attention, shared experts, latent projections, embeddings: **114.4 GB** |
-| Attention | hybrid — 24 MLA layers, **69 KDA linear-attention** layers, 1M context |
-| Activation | `situ`, **not** SwiGLU (`activation_situ_linear_beta` 25.0) |
-| Prompt format | XTML (`<\|open\|>` / `<\|close\|>` / `<\|sep\|>`), **not** the K2 control tokens |
+## Install and run the proxy
 
-Two consequences worth stating plainly:
-
-**Moonshot ships K3 already quantized, so their release is the reference.** There
-is no higher-precision K3 to lose ground against. Reading it losslessly costs
-nothing; the loss ledger starts only when we change something.
-
-**"K3 is 4-bit" is over-stated.** Only the *routed* experts are. 2 of the 18
-experts active per token are the BF16 shared experts.
-
-## Status, honestly
-
-This project has an adversarial verification pass (`wf_9f96ac7d-99b`) that
-attacked its own load-bearing claims. Three of four failed. What that changed:
-
-- **Performance numbers are under revision.** An earlier figure of 8.4–9.6 tok/s
-  for batch-1 decode was refuted: it implies the 114.4 GB of BF16 dense weights
-  move at 3.6× theoretical peak DRAM. The corrected figure is closer to
-  ~3.3 tok/s. **Do not price hardware off the old number.**
-- **`research/verify_lossless.py` proves nothing.** It multiplies and divides by
-  the same power of two, so its check is a tautology that returns PROVEN for a
-  swapped nibble order. The *conclusion* survives on independent evidence (two
-  ports of `compressed-tensors` agreeing bit-identically on real bytes); the
-  script does not.
-- **`research/expert_spectrum_v2.py`'s verdict must not be cited.** Its statistic
-  saturates at ≈ min(sketch², n) and its thresholds sit below the checkpoint's
-  own ~16% quantization noise floor. The decision it reached — that a global
-  shared-basis low-rank codec is not worth pursuing — still stands, but on
-  participation-ratio evidence, not on that script.
-
-Nothing above was found by a customer. It was found by pointing agents at our
-own work and asking them to break it.
-
----
-
-# k3 — the proxy
-
-Client presets for the K3 inference engine.
-
-vLLM makes you assemble `--tool-call-parser`, `--chat-template`, and a reasoning
-parser yourself, then hope the coding agent you're pointing at it agrees. `k3`
-bundles that per client instead, detects which client is calling from the
-request itself, and prints the line you paste to start using it.
-
-```
-$ k3 serve
-  k3 0.1.0   serving on http://localhost:8080
-  engine  http://127.0.0.1:8000/v1   model k3
-  client  auto-detect (7 presets)
-
-  Claude Code
-
-    export ANTHROPIC_BASE_URL=http://localhost:8080
-    export ANTHROPIC_AUTH_TOKEN=local
-    export ANTHROPIC_MODEL=k3
-    claude
-```
-
-No engine yet? `k3 serve --mock` runs the whole path — dialects, tool parsing,
-reasoning translation — against a scripted stand-in.
-
-## Install
+Install the locked development environment with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync
+uv sync --frozen
 uv run k3 --help
 ```
 
-## Use
+Run the protocol path against the built-in mock upstream without model weights
+or a GPU:
 
 ```bash
-k3 serve                          # auto-detect the client per request
-k3 serve --client claude-code     # pin a preset
-k3 serve --mock                   # no GPU required
-k3 serve --record ./session       # record traffic for the conformance suite
-
-k3 presets -v                     # what each preset bundles
-k3 detect -H 'user-agent: claude-cli/1.0.60'   # why a request resolves where it does
-k3 doctor                         # presets validate, engine reachable?
-k3 replay ./session               # did anything change?
+uv run k3 serve --mock
 ```
 
-Point the engine somewhere else with `--upstream http://host:8000/v1 --model k3`.
-
-### Exposure
-
-`k3` binds `127.0.0.1` and runs open by default, which is right for a local
-engine. Two things are deliberately not permissive:
-
-- **CORS is off** unless you pass `--cors-origin https://…` (repeatable). A
-  wildcard would let any page you visit drive your engine and read the replies.
-- **`--api-key TOKEN`** gates every route except `/health`, which stays
-  reachable for container health checks but reports only `{"status": …}`
-  without credentials.
-
-If you bind `--host 0.0.0.0`, set `--api-key`.
-
-## What a preset bundles
-
-Six things, per client:
-
-| | |
-|---|---|
-| **route + dialect** | which endpoints to expose; Messages vs Chat Completions vs Responses |
-| **tool parser** | Kimi control tokens, hermes tags, bare JSON, pythonic — or `passthrough` when the engine already parsed them |
-| **chat template** | how messages and tool definitions render into K3's prompt |
-| **reasoning translation** | both directions — see below |
-| **defaults** | reasoning effort, max tokens, streaming shape |
-| **model aliasing** | whatever model string the client asks for resolves to K3 |
-
-```
-$ k3 presets
-
-preset       status        dialect              tools  reasoning          routes
-claude-code  stable        anthropic_messages   kimi   thinking_blocks    /v1/messages …
-openai       stable        openai_chat          kimi   strip              /v1/chat/completions …
-codex        stable        openai_responses     kimi   responses_item     /v1/responses …
-kimi-code    provisional   openai_chat          kimi   reasoning_content  /v1/chat/completions …
-cline        provisional   openai_chat          kimi   reasoning_content  /v1/chat/completions …
-opencode     provisional   openai_chat          kimi   reasoning_content  /v1/chat/completions …
-aider        provisional   openai_chat          kimi   inline_tags        /v1/chat/completions …
-```
-
-`stable` means there is recorded client traffic pinning the behaviour.
-`provisional` means the preset is built from the client's documented wire format
-but hasn't been pinned by a recording yet. Promote one by recording real traffic
-and dropping the cassette in — see [Conformance](#conformance).
-
-Today that means:
-
-- **claude-code** — three cassettes from a real `claude` CLI session against
-  this server, including the second turn of an agent loop where a `thinking`
-  block came back and its reasoning was restored into the engine payload.
-- **codex** — two cassettes from a real `codex exec` session, covering a
-  `function_call` and the `function_call_output` turn that follows it.
-- **openai** — three cassettes recorded from the official `openai` Python SDK,
-  the reference implementation of the dialect.
-
-`kimi-code`, `cline`, `opencode`, and `aider` are pinned by synthetic bodies
-until someone records them. See [`tests/cassettes/README.md`](tests/cassettes/README.md).
-
-**Kimi Code is the correctness reference.** Moonshot says K3 works best with it,
-so if another preset diverges from Kimi Code's behaviour, the preset is wrong,
-not the model.
-
-## Auto-detection
-
-You can tell who's calling from the request itself, so `--client` is an override
-rather than a requirement.
-
-- `POST /v1/messages` with an `anthropic-version` header → Claude Code
-- `POST /v1/responses` → Codex
-- `POST /v1/chat/completions` → generic OpenAI, unless a user-agent or vendor
-  header (`http-referer: cline.bot`, `x-msh-client`, …) says otherwise
-
-A *strong* signal — user-agent or vendor header — makes a preset eligible; weak
-signals only break ties; every route has a fallback so an unrecognised client
-still gets served. Every decision carries a reason you can read:
-
-```
-$ k3 detect --path /v1/messages -H 'user-agent: claude-cli/1.0.60' -H 'anthropic-version: 2023-06-01'
-  preset   claude-code  (Claude Code)
-  why      user-agent ~ /claude-cli//, header anthropic-version
-  score    95
-  dialect  anthropic_messages
-```
-
-## Reasoning translation
-
-This is the part that's hard, and the part that makes the project real.
-
-K3 emits `reasoning_content` and requires the complete assistant message passed
-back **verbatim** on the next turn. Every client wants that in a different
-shape — Claude Code wants `thinking` blocks, Codex wants reasoning items,
-OpenAI chat wants it stripped. Lose it and K3 degrades across agent loops, and
-every user blames your quantization.
-
-So `k3` converts K3's reasoning out to the client's format, then converts the
-client's echo back into exactly what K3 expects, byte for byte. Three vehicles,
-tried in order:
-
-1. **Ledger.** A signature carries an id that resolves to the *complete*
-   upstream assistant message — including raw tool-call argument strings, which
-   no client can round-trip losslessly because it parses them into objects. When
-   this hits, the bytes are the original bytes.
-2. **Self-contained signature.** `k3r1.<base64url(zlib(json))>` carries the
-   reasoning text itself. Survives a restart, survives the client dropping the
-   visible text, needs no shared state. This is what rides in Anthropic's
-   `signature` field and the Responses API's `encrypted_content`.
-3. **Fingerprint.** For clients that strip reasoning entirely, hash the parts
-   every client *does* round-trip — text, tool names, normalised arguments — and
-   look the reasoning up by that. This is what keeps K3 from degrading on a
-   plain OpenAI client.
-
-If all three miss, we fall back to whatever visible text there is, which is
-exactly the pre-`k3` behaviour — never worse.
-
-One related trap, handled: Anthropic `tool_use` ids and OpenAI `tool_calls` ids
-live in different namespaces. `k3` uses a deterministic reversible prefix
-(`toolu_k3_…`) rather than minting fresh ids and keeping a map, because a map
-doesn't survive a restart and a mismatch silently breaks every agent loop.
-
-## Conformance
-
-Claude Code, Codex, and the rest all ship updates, and a preset that worked last
-month can break silently. Without recorded traffic you find out from GitHub
-issues.
+To use a real engine, point the proxy at an OpenAI-compatible Kimi K3 endpoint:
 
 ```bash
-k3 serve --record ./session    # then use your client normally
-k3 replay ./session            # after any change
+uv run k3 serve --upstream http://127.0.0.1:8000/v1 --model k3
 ```
 
-A cassette records what the client sent, what we sent the engine, what the
-engine streamed back, and the exact bytes we returned. Replaying re-runs it with
-the engine stubbed out by its own recording, so a change in any preset, dialect,
-or parser shows up as a diff — in the client-facing bytes *and* in the payload
-we send K3. Auth headers are redacted on write; cassettes are meant to be
-committed. Add `--record-compress` for real sessions, which are large.
+The proxy binds to `127.0.0.1` by default. If it is bound to a non-loopback
+address, configure `--api-key` and review the exposure settings before use.
 
-Cassettes carry their provenance. `source: recorded` is real traffic captured
-off the wire from the actual client; `source: synthetic` is a request body
-written to match the client's documented format. Both pin behaviour, only one
-proves it, and `tests/test_conformance.py` enforces that a `stable` preset has
-recorded traffic behind it.
+## Measured findings
 
-Non-deterministic fields (ids, timestamps, the random ledger id inside a
-signature) are normalised rather than ignored: a signature is decoded and
-replaced with a hash of *the reasoning it carries*, so the comparison still
-fails if the reasoning payload changes. Tool-call argument whitespace is allowed
-to differ, since a cold replay rebuilds arguments from the client's parsed copy.
+The measurements below come from `engine/modal_kernelbench.py`. Warmup was
+discarded and CUDA was synchronized. They are component measurements, not a
+full serving benchmark.
 
-One honest limitation: presets whose reasoning policy is `strip` have no
-client-side vehicle at all, so restoration runs entirely off the server-side
-fingerprint index — which a cold replay cannot reproduce by construction. Those
-are exempted from the upstream reasoning comparison; every other preset carries
-a signature through the client and *must* restore reasoning even on a cold
-server, which the suite does assert.
+| Finding | Hardware and conditions | Result | Source |
+| --- | --- | --- | --- |
+| PCIe expert streaming is not a viable Kimi K3 decode design | H100 80 GB HBM3; measured host-to-device bandwidth of 53.7 GB/s for 17.5 MB expert-sized transfers; 25.83 GB of routed expert bytes per token | 2.08 tok/s bound | [`engine/MEASUREMENTS.md`](engine/MEASUREMENTS.md#pcie-expert-streaming-is-dead-measured) |
+| Naive dequantization dominates one routed-expert tensor path | H100 80 GB HBM3; naive PyTorch MXFP4 dequant of one `w1` tensor compared with a 3072 x 3584 batch-1 expert GEMM | 0.342 ms dequant versus 0.023 ms GEMM, about 15 times the GEMM time | [`engine/MEASUREMENTS.md`](engine/MEASUREMENTS.md#dequantization-dominates-the-expert-path-by-an-order-of-magnitude) |
+| Expert GEMM amortizes across a larger batch | H100 80 GB HBM3; the same expert GEMM at batch 1 and batch 32 | 23.3 microseconds at batch 1 and 22.6 microseconds at batch 32 | [`engine/MEASUREMENTS.md`](engine/MEASUREMENTS.md#batching-is-nearly-free-on-the-compute-side) |
+| The partial real-weight path executes, but is not a throughput result | H100 80 GB HBM3; actual Moonshot checkpoint; layers 11 through 13 only; four generated tokens; network-volume reads; no fusion | 11.010 seconds generation time and 25.245 GB peak allocation | [`engine/MEASUREMENTS.md`](engine/MEASUREMENTS.md#real-tokens-from-real-kimi-k3-weights) |
+
+The three-layer run is a correctness result. Its timing must not be extrapolated
+to all 93 layers, and its generated tokens are not evidence of model quality.
+
+## Projected and unmeasured work
+
+The Kimi-Linear laptop model uses exact parameter and byte arithmetic, followed
+by a projected bandwidth roofline. It has not been measured on a laptop.
+
+| Projection | Hardware and conditions | Projected result | Source |
+| --- | --- | --- | --- |
+| Kimi-Linear INT4 weight-only batch-1 decode | Complete 24.561 GB packed weight bank resident in a 100 GB/s DDR5 path; 60 percent attainment transferred from a different K3 calibration | 38.62 tok/s projected | [`engine/laptop/RESULTS.md`](engine/laptop/RESULTS.md#bandwidth-roofline) |
+| Kimi-Linear INT4 weight-only batch-1 decode | Complete 24.561 GB packed weight bank and runtime state resident in a 900 GB/s dGPU memory path; 60 percent transferred attainment | 347.61 tok/s projected | [`engine/laptop/RESULTS.md`](engine/laptop/RESULTS.md#bandwidth-roofline) |
+
+The laptop report also states that INT4 accuracy was not measured and that the
+existing K3 loader is not a complete Kimi-Linear loader. The end-to-end
+Kimi-Linear benchmark remains `UNMEASURED`; its checked-in runtime ranges are
+modelled planning estimates only. See
+[`engine/bench/RESULTS.md`](engine/bench/RESULTS.md).
+
+`engine/batching/` contains analytic throughput models calibrated with measured
+component inputs. Its generated throughput tables are modelled, not measured.
+`engine/scheduling/RESULTS.md` currently records that the routing-aware
+composition simulation was not run, so no scheduling throughput gain is
+claimed here.
+
+## Tests and supported matrix
+
+The package declares Python 3.10 through 3.13 on Linux, macOS, and Windows.
+`.github/workflows/ci.yml` enforces that contract with this matrix:
+
+| Operating system runner | Python versions |
+| --- | --- |
+| Ubuntu 24.04 | 3.10, 3.11, 3.12, 3.13 |
+| macOS 14 | 3.10, 3.11, 3.12, 3.13 |
+| Windows Server 2022 | 3.10, 3.11, 3.12, 3.13 |
+
+The workflow sets Python UTF-8 mode, installs from the lockfile with uv, runs
+Ruff, builds the package, and runs the offline suite with tests marked `gpu`,
+`network`, or `weights` deselected. This describes the CI contract, not a claim
+that a public CI run has already passed.
+
+Run the same blocking checks locally with:
 
 ```bash
-uv run pytest                                              # everything
-uv run python scripts/build_fixtures.py --raw ./session    # curate a session
+uv sync --frozen
+uv run --no-sync ruff check .
+uv run --no-sync python -m pytest -m "not gpu and not network and not weights"
 ```
 
-## Architecture
+## Third-party reference material
 
-```
-client body ──ingress──▶ CanonicalRequest ──build_payload──▶ engine
-                                                                │
-client SSE ◀──egress── StreamEvent* ◀──pipeline.run── engine chunks
-```
+The files under `reference/` include Moonshot code and a chat template retained
+so tests can compare this project's rendering with Moonshot's implementation.
+They are not imported by the `k3` runtime and they are not relicensed under this
+project's Apache-2.0 licence.
 
-| file | |
-|---|---|
-| `k3/ir.py` | canonical IR; raw tool arguments and raw reasoning never get reserialized |
-| `k3/reasoning.py` | signature codec, ledger, restoration — the hard part |
-| `k3/toolcalls.py` | incremental parsers; a control token split across chunks never leaks |
-| `k3/template.py` | system prompt and tool-definition rendering |
-| `k3/presets.py` | the seven presets |
-| `k3/detect.py` | scoring, with a reason for every decision |
-| `k3/dialects/` | `anthropic_messages`, `openai_chat`, `openai_responses` |
-| `k3/pipeline.py` | engine chunks → canonical events (streaming and not, one path) |
-| `k3/upstream.py` | engine adapter + the mock engine |
-| `k3/record.py`, `k3/replay.py` | cassettes |
-| `k3/server.py`, `k3/cli.py` | HTTP surface, command line |
+See [`reference/PROVENANCE.md`](reference/PROVENANCE.md) for exact upstream
+revisions, file relationships, fetched licence text, and redistribution terms.
 
-Streaming and non-streaming share `pipeline.run` — a non-streaming engine
-response becomes a short synthetic chunk list — so the two paths can't drift.
+## Contributing and security
 
-## Engine expectations
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development and evidence rules.
+Report security issues through the process in [SECURITY.md](SECURITY.md).
 
-`k3` talks to any OpenAI-compatible `/v1/chat/completions` endpoint that serves
-K3. Configure how it carries reasoning:
+## Licence
 
-```bash
---reasoning-field reasoning_content   # vLLM / SGLang / Moonshot (default)
---reasoning-field inline              # <think>…</think> inside content
---reasoning-field none                # engine has no reasoning channel
-```
-
-If the engine was started with its own tool-call parser, set the preset's parser
-to `passthrough` and native `tool_calls` deltas are used instead. Otherwise `k3`
-parses the model's raw text — the default, since it keeps the format contract in
-one place.
-
-## Status
-
-Three presets are pinned by recorded traffic — **claude-code**, **codex**, and
-**openai** — which covers most agent usage. The rest are built from documented
-wire formats and are expected to work; they get promoted as recordings land. The
-conformance harness was built with the second preset, not the sixth, which is
-the only reason the third and fourth were cheap.
-
-Licensed Apache-2.0 — see [`LICENSE`](LICENSE).
+Original project code and documentation are licensed under Apache-2.0. See
+[LICENSE](LICENSE). Third-party files in `reference/` remain under the upstream
+terms documented in [reference/PROVENANCE.md](reference/PROVENANCE.md).
