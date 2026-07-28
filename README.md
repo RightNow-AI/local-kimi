@@ -18,6 +18,13 @@ What is measured:
   BF16 checkpoint. 98,245,528,576 bytes of source tensors become
   28,803,304,448, a 3.41x reduction in weight bytes. Planned and actual byte
   totals agree exactly. See `engine/quant/QUANTIZATION-RESULTS.md`.
+- This engine loads and runs that artifact. On one H100 80GB, all 27 layers and
+  all 256 experts per MoE layer, resident weight bytes equal the checkpoint's
+  tensor storage exactly at 28,803,304,448, peak reserved device memory during
+  generation is 30,511,464,448 bytes (28.42 GiB), and the continuation it
+  produces is coherent English. One short greedy generation from one prompt, so
+  it establishes that the stack is wired correctly and nothing about quality or
+  throughput. See `engine/klinear/INT4-SERVING-RESULTS.md`.
 - Stock vLLM 0.26.0 will not serve this model below BF16. On one H200, the
   as-shipped checkpoint loads and generates, while the bitsandbytes 4-bit path
   is refused at load with `Model KimiLinearForCausalLM does not support
