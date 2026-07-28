@@ -20,8 +20,34 @@ app = modal.App("kimi-linear-engine")
 
 MODEL_NAME = "moonshotai/Kimi-Linear-48B-A3B-Instruct"
 WEIGHTS_MOUNT = "/weights"
-MODEL_DIRECTORY = f"{WEIGHTS_MOUNT}/Kimi-Linear-48B-A3B-Instruct"
+QUANTIZED_MOUNT = "/quantized"
+BF16_DIRECTORY = f"{WEIGHTS_MOUNT}/Kimi-Linear-48B-A3B-Instruct"
+INT4_DIRECTORY = f"{QUANTIZED_MOUNT}/Kimi-Linear-48B-A3B-Instruct-W4A16"
 WEIGHTS = modal.Volume.from_name("kimi-linear-weights", create_if_missing=False)
+QUANTIZED = modal.Volume.from_name("kimi-linear-quantized", create_if_missing=False)
+
+#: Which checkpoint to serve. Both volumes are mounted so the choice is a
+#: setting rather than a redeploy, and the INT4 path is the one the product
+#: argument rests on: 28,803,304,448 measured bytes against 98,245,528,576 for
+#: BF16. Defaults to int4 for exactly that reason. Set K3_CHECKPOINT=bf16 to
+#: serve the as-shipped weights, which is what the comparison baseline needs.
+CHECKPOINT_KIND = os.environ.get("K3_CHECKPOINT", "int4").strip().lower()
+
+
+def _model_directory() -> str:
+    """Resolve the checkpoint directory, refusing an unrecognised setting.
+
+    Defaulting silently to BF16 on a typo would serve a 91.5 GiB checkpoint
+    while the operator believed they were serving 26.8 GiB, and the only
+    symptom would be a memory figure nobody was looking at.
+    """
+    if CHECKPOINT_KIND == "int4":
+        return INT4_DIRECTORY
+    if CHECKPOINT_KIND == "bf16":
+        return BF16_DIRECTORY
+    raise ValueError(
+        f"K3_CHECKPOINT must be 'int4' or 'bf16', got {CHECKPOINT_KIND!r}"
+    )
 
 # The BF16 checkpoint is measured at 91.51 GiB. An 80 GB GPU cannot hold that
 # checkpoint, so this service deliberately requests one H200. The devel image
@@ -66,9 +92,11 @@ def _build_app():
     from engine.serve.api import ServerConfig, create_app
     from engine.serve.klinear_engine import KimiChatTokenizer, KLinearEngine
 
-    if not os.path.isdir(MODEL_DIRECTORY):
+    model_directory = _model_directory()
+    if not os.path.isdir(model_directory):
         raise FileNotFoundError(
-            f"model directory is missing from kimi-linear-weights: {MODEL_DIRECTORY}"
+            f"checkpoint directory is missing for K3_CHECKPOINT={CHECKPOINT_KIND}: "
+            f"{model_directory}"
         )
     if not torch.cuda.is_available():
         raise RuntimeError("Kimi-Linear serving requires a CUDA GPU")
@@ -76,9 +104,12 @@ def _build_app():
     device = torch.device("cuda")
     torch.cuda.reset_peak_memory_stats(device)
     load_started = time.perf_counter()
-    tokenizer = KimiChatTokenizer.from_directory(MODEL_DIRECTORY)
+    # The tokenizer always comes from the BF16 checkpoint. The quantizer copies
+    # support files, but the tokenizer is not a weight and there is no reason
+    # for two copies of it to drift apart.
+    tokenizer = KimiChatTokenizer.from_directory(BF16_DIRECTORY)
     model = KLinearModel.from_directory(
-        MODEL_DIRECTORY,
+        model_directory,
         device=device,
         dtype=torch.bfloat16,
         expert_cache_entries=256,
@@ -112,7 +143,7 @@ def _build_app():
     min_containers=1,
     scaledown_window=20 * 60,
     timeout=4 * 60 * 60,
-    volumes={WEIGHTS_MOUNT: WEIGHTS},
+    volumes={WEIGHTS_MOUNT: WEIGHTS, QUANTIZED_MOUNT: QUANTIZED},
 )
 @modal.concurrent(max_inputs=1)
 @modal.asgi_app()
