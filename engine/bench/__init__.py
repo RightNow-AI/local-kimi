@@ -5,6 +5,7 @@ from .ledger import (
     LossLedger,
     MeasurementKind,
     Transformation,
+    comparison_loss_ledger,
     render_ledger,
     standard_loss_ledger,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "LossLedger",
     "MeasurementKind",
     "Transformation",
+    "comparison_loss_ledger",
     "perplexity",
     "routing_agreement",
     "render_ledger",

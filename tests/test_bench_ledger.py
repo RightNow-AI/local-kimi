@@ -5,6 +5,7 @@ from engine.bench.ledger import (
     LossLedger,
     MeasurementKind,
     Transformation,
+    comparison_loss_ledger,
     standard_loss_ledger,
 )
 
@@ -60,3 +61,30 @@ def test_numeric_entry_requires_arithmetic():
             MeasurementKind.MEASURED,
             0.1,
         )
+
+
+def test_comparison_ledger_marks_only_observed_metrics_measured():
+    ledger = comparison_loss_ledger(
+        {
+            "mean_token_kl_nats": 0.001,
+            "mean_token_kl_arithmetic": "0.002 / 2 = 0.001",
+            "top1_agreement": 0.5,
+            "top1_arithmetic": "1 / 2 = 0.5",
+            "routing_agreement": 0.75,
+            "routing_arithmetic": "3 / 4 = 0.75",
+            "perplexity_relative_delta": 0.02,
+            "perplexity_arithmetic": "(5.1 - 5.0) / 5.0 = 0.02",
+        },
+        candidate_label="engine candidate",
+        reference="HuggingFace checkpoint",
+    )
+
+    measured = [entry for entry in ledger.entries if entry.kind is MeasurementKind.MEASURED]
+    assert {entry.metric for entry in measured} == {
+        "mean_token_kl_nats",
+        "top1_agreement",
+        "routing_agreement",
+        "perplexity_relative_delta",
+    }
+    with pytest.raises(ValueError, match="UNMEASURED"):
+        ledger.total_loss("quality_loss")
