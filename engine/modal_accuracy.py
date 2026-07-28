@@ -28,9 +28,21 @@ SOURCE_MOUNT = "/weights"
 ACCURACY_MOUNT = "/accuracy"
 SOURCE_MODEL = f"{SOURCE_MOUNT}/Kimi-Linear-48B-A3B-Instruct"
 
+# The official vLLM image is the right base: it carries a correctly built vLLM
+# and the CUDA toolchain this model needs at RUN time, because Kimi-Linear's KDA
+# path JIT-compiles kernels at startup. It ships python3 but no `python` on
+# PATH, which breaks Modal twice: pip_install shells out to `python -m pip` and
+# fails the build with "python: not found", and Modal separately introspects
+# `python` to determine the image Python version and fails with a ConflictError
+# before the function starts. The symlink fixes both.
+#
+# Do NOT replace this with add_python. That installs a second interpreter which
+# does not have vLLM in it. This exact fix has now been lost once to a file
+# overwrite, so it is spelled out rather than left as a one-line incantation.
 IMAGE = (
     modal.Image.from_registry("vllm/vllm-openai:v0.26.0")
     .entrypoint([])
+    .run_commands("ln -sf \"$(command -v python3)\" /usr/local/bin/python")
     .pip_install("safetensors>=0.5,<1", "numpy>=2,<3")
     .env({"VLLM_USE_V1": "1"})
     .add_local_dir(Path(__file__).parent, remote_path="/root/engine")
