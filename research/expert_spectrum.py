@@ -1,10 +1,12 @@
-"""Measure the cross-expert singular spectrum of one Kimi K3 MoE layer.
+"""WARNING: legacy diagnostic only; this script must not be cited as evidence.
 
-The thesis this decides: K3's 896 routed experts per layer all operate inside ONE
-shared 3584-dim latent basis, so their weight matrices may lie near a low-rank
-subspace along the EXPERT axis. If they do, the whole expert bank collapses into
-R shared basis matrices plus per-expert coefficients, and per-token expert weight
-movement goes to zero. If they do not, that plan dies here.
+Only the routed-expert matrices studied here are MXFP4. K3's shared experts,
+attention, latent projections, and embeddings remain BF16 and total 114.4 GB;
+two shared experts participate alongside 16 routed experts per token.
+
+This legacy raw-weight sketch ignores the hidden-unit permutation gauge described
+in ``expert_spectrum_v2.py``. Its apparent spectrum cannot decide whether a shared
+basis exists. The script is retained only to reproduce historical diagnostics.
 
 Method, so it runs on a laptop against a 1.5 TB model:
   * read only the tensors we need, by HTTP range against the safetensors shard,
@@ -13,31 +15,36 @@ Method, so it runs on a laptop against a 1.5 TB model:
     exponent per 32-element group);
   * never hold 896 full matrices - project each to a small two-sided sketch
     S_e = P^T W_e R, which preserves inner products up to JL variance;
-  * the Gram of the sketches gives the squared singular values of the stacked
-    expert matrix, hence the spectrum and the effective rank;
+  * the Gram gives the spectrum of the flattened sketches only, not the rank of
+    hidden-unit-aligned factor stacks;
   * compare against a Marchenko-Pastur baseline built from norm-matched random
-    matrices, so we can tell real structure from a dimensionality artifact.
+    matrices. This historical control does not repair the permutation gauge.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import struct
+import sys
 import time
 import urllib.request
 from pathlib import Path
 
 import numpy as np
+import torch
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+dequantize_mxfp4 = importlib.import_module(
+    "engine.k3ref.dequant"
+).dequantize_mxfp4
 
 BASE = "https://huggingface.co/moonshotai/Kimi-K3/resolve/main"
 INDEX = "model.safetensors.index.json"
-
-# 4-bit E2M1 code -> value. Codes 8..15 are the negatives of 0..7.
-E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
-E2M1_FULL = np.concatenate([E2M1, -E2M1])
-
 
 def http(url: str, rng: tuple[int, int] | None = None, retries: int = 4) -> bytes:
     headers = {"User-Agent": "k3-spectrum"}
@@ -67,33 +74,35 @@ def load_header(shard: str, cache: Path) -> tuple[dict, int]:
     return header, 8 + n
 
 
-def dequant_mxfp4(packed: np.ndarray, scale: np.ndarray, out_cols: int) -> np.ndarray:
-    """(rows, cols/2) U8 nibbles + (rows, cols/32) U8 exponents -> float32 matrix."""
-    lo = packed & 0x0F
-    hi = packed >> 4
-    vals = np.empty((packed.shape[0], packed.shape[1] * 2), dtype=np.uint8)
-    vals[:, 0::2] = lo
-    vals[:, 1::2] = hi
-    w = E2M1_FULL[vals[:, :out_cols]]
-    # E8M0: the stored byte is a biased power-of-two exponent.
-    exp = np.exp2(scale.astype(np.int16) - 127).astype(np.float32)
-    groups = out_cols // scale.shape[1]
-    return w * np.repeat(exp, groups, axis=1)
+def dequant_mxfp4(packed: np.ndarray, scale: np.ndarray) -> np.ndarray:
+    """NumPy adapter around the canonical PyTorch MXFP4 codec."""
+    packed_tensor = torch.tensor(packed, dtype=torch.uint8)
+    scale_tensor = torch.tensor(scale, dtype=torch.uint8)
+    return dequantize_mxfp4(packed_tensor, scale_tensor).cpu().numpy()
+
+
+def raw_cache_path(cache: Path, tensor_name: str) -> Path:
+    return cache / (tensor_name.replace(".", "_") + ".npy")
 
 
 def fetch_expert(shard: str, header: dict, data_start: int, name: str, cache: Path) -> np.ndarray:
     """Range-read one packed tensor and its scale, return the dequantized matrix."""
     out = cache / (name.replace(".", "_") + ".npy")
-    if out.exists():
-        return np.load(out)
     mats = {}
     for suffix in ("weight_packed", "weight_scale"):
-        meta = header[f"{name}.{suffix}"]
+        tensor_name = f"{name}.{suffix}"
+        cached = raw_cache_path(cache, tensor_name)
+        if cached.exists():
+            mats[suffix] = np.load(cached)
+            continue
+        meta = header[tensor_name]
         a, b = meta["data_offsets"]
         raw = http(f"{BASE}/{shard}", (data_start + a, data_start + b - 1))
         mats[suffix] = np.frombuffer(raw, dtype=np.uint8).reshape(meta["shape"])
-    cols = mats["weight_packed"].shape[1] * 2
-    w = dequant_mxfp4(mats["weight_packed"], mats["weight_scale"], cols)
+        np.save(cached, mats[suffix])
+    if out.exists():
+        return np.load(out)
+    w = dequant_mxfp4(mats["weight_packed"], mats["weight_scale"])
     np.save(out, w.astype(np.float16))
     return w.astype(np.float16)
 
@@ -184,10 +193,9 @@ def main() -> int:
         print(f"  effective rank @ {int(f*100)}% energy: {effective_rank(ev_c, f)} / {n}")
     print(f"  participation ratio: {1.0/np.sum((ev_c/ev_c.sum())**2):.1f}")
 
-    print("\nINTERPRETATION")
-    print("  If NORMALIZED effective rank @95% is far below the random control,")
-    print("  the experts share a genuine low-dimensional structure and cross-expert")
-    print("  factorization is viable. If it tracks the control, the thesis is dead.")
+    print("\nWARNING: NO COMPRESSION VERDICT")
+    print("  Raw expert sketches are not aligned across hidden-unit permutations.")
+    print("  Do not cite this spectrum as evidence for or against factorization.")
 
     np.save(cache / f"spectrum_layer{args.layer}_{args.proj}.npy", M)
     print(f"\nsketches saved -> {cache}/spectrum_layer{args.layer}_{args.proj}.npy")

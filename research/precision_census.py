@@ -1,10 +1,10 @@
-"""What precision is Kimi K3 actually published in?
+"""What precision is each published Kimi K3 component stored in?
 
-This decides what "quality loss versus full K3" even means. If Moonshot ships
-the experts already quantized, then their release IS the baseline and we have
-lost nothing by reading it; the loss ledger only starts when we change something.
-If they ship BF16, then the 4-bit expert tensors we found are somebody's
-derivative and the real reference lives elsewhere.
+The routed-expert matrices are MXFP4, but that is not the whole-model baseline.
+Shared experts, attention, latent projections, and embeddings remain BF16 and
+total 114.4 GB. Two shared experts participate alongside 16 routed experts per
+token. The published routed-expert values are the quantized baseline; decoder
+fidelity is a separate claim that ``verify_lossless.py`` must establish.
 """
 
 from __future__ import annotations
@@ -109,14 +109,15 @@ def main() -> int:
           f"({exp_bytes/1e6:.2f} MB packed + {exp_scale/1e6:.2f} MB scales)")
     print(f"  whole model  : {total_size*8/2.78e12:.3f} bits/param average")
 
-    print("\n=== VERDICT ===")
+    print("\n=== BASELINE SUMMARY ===")
     u8 = by_dtype.get("U8", [0, 0])[1]
     if u8 > 0.5 * tot:
-        print("  Moonshot ships K3 with the expert mass ALREADY 4-bit packed.")
-        print("  Their release IS the reference. Reading it losslessly costs us nothing;")
-        print("  the loss ledger starts only when we change something.")
+        print("  Moonshot ships K3's routed-expert matrices in MXFP4.")
+        print("  Shared experts, attention, latent projections, and embeddings remain")
+        print("  BF16 and total 114.4 GB; two shared experts join 16 routed experts/token.")
+        print("  Decoder fidelity is established separately by verify_lossless.py.")
     else:
-        print("  The bulk is not U8 - there is a higher-precision reference to compare against.")
+        print("  The sampled routed-expert mass is not predominantly U8.")
     return 0
 
 
