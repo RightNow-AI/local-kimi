@@ -61,9 +61,20 @@ IMAGE = (
         "numpy>=2.0",
         "tiktoken>=0.9",
         "blobfile>=3.0",
+        # engine.serve.contracts cannot be imported without these: the package
+        # __init__ pulls in api.py, which imports FastAPI. This job needs only
+        # the ChatPrompt dataclass and the tokenizer, but Python does not let
+        # you take part of a package.
+        "fastapi>=0.115",
+        "pydantic>=2.7",
     )
     .env({"CUDA_HOME": "/usr/local/cuda"})
     .add_local_dir(Path(__file__).parent, remote_path="/root/engine")
+    # k3 is required, not optional. engine/serve/klinear_engine reuses
+    # k3/toolcalls.py for the K2-family tool-call parser rather than writing a
+    # third implementation of it, so the serving package does not import
+    # without this.
+    .add_local_dir(Path(__file__).parent.parent / "k3", remote_path="/root/k3")
 )
 
 PROMPTS = (
