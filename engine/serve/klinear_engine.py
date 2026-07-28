@@ -123,10 +123,34 @@ class KimiChatTokenizer:
             kwargs["tool_choice"] = prompt.tool_choice
 
         token_ids = self.tokenizer.apply_chat_template(messages, **kwargs)
+        # apply_chat_template returns different shapes across tokenizer classes:
+        # a plain list, a tensor, or a BatchEncoding-like object carrying
+        # input_ids. Normalise all three rather than assuming one, and if it is
+        # none of them, say WHAT arrived, because the previous message did not
+        # and cost a GPU round trip to diagnose.
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.tolist()
+        elif hasattr(token_ids, "input_ids"):
+            token_ids = token_ids.input_ids
+            if isinstance(token_ids, torch.Tensor):
+                token_ids = token_ids.tolist()
+        elif isinstance(token_ids, Mapping) and "input_ids" in token_ids:
+            token_ids = token_ids["input_ids"]
+            if isinstance(token_ids, torch.Tensor):
+                token_ids = token_ids.tolist()
         if not isinstance(token_ids, Sequence) or isinstance(token_ids, (str, bytes)):
-            raise TypeError("Moonshot chat template did not return token IDs")
+            raise TypeError(
+                "Moonshot chat template did not return token IDs; got "
+                f"{type(token_ids).__name__}"
+            )
+        # A single-element batch is a normal shape for some tokenizers; unwrap it
+        # rather than refusing, and only refuse a genuine multi-row batch.
+        if (
+            len(token_ids) == 1
+            and isinstance(token_ids[0], Sequence)
+            and not isinstance(token_ids[0], (str, bytes))
+        ):
+            token_ids = token_ids[0]
         if token_ids and isinstance(token_ids[0], Sequence):
             raise ValueError("Moonshot chat template unexpectedly returned a batch")
         result = list(token_ids)
