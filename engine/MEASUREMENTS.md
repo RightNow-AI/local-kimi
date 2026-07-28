@@ -19,6 +19,31 @@ fix for a bad guess is not a better guess.
 | Expert GEMM, batch 32 | 81.8 us | **22.6 us** |
 | GEMM batch 32 throughput | 8.62 TFLOP/s | 31.19 TFLOP/s |
 
+## Real tokens from real Kimi K3 weights
+
+The first end-to-end generation, on an H100 80GB HBM3 from the actual Moonshot
+checkpoint:
+
+```
+layers            [11, 12, 13]      real K3 weights off the Modal volume
+prompt_token_ids  [100, 200, 300, 400]
+generated_token_ids  [72628, 50873, 113280, 67093]
+load_seconds      20.197
+generation_seconds 11.010            4 tokens
+peak_allocated_gb 25.245
+```
+
+Every generated id falls inside K3's 163,840-token vocabulary, and the whole
+path executed: embeddings, KDA and MLA attention with their separate state
+objects, the `noaux_tc` router, MXFP4 expert dequantization, the latent MoE,
+the final norm, the LM head, and sampling.
+
+**What this does not show.** Three layers of ninety-three ran, so the tokens are
+not semantically meaningful - the model is not there, only the machinery. And
+the timing is a reference implementation reading from a network volume with no
+fusion, so 2.75 s/token across 3 layers must NOT be extrapolated to 93. It is a
+correctness result, not a throughput result.
+
 ## What the measurements establish
 
 ### PCIe expert streaming is dead, measured

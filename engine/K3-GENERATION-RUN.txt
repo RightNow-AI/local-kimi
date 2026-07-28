@@ -1,0 +1,396 @@
+﻿modal : C:\Users\jaber\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\modal\_utils\async_utils.py:42: DeprecationWarning: 
+'asyncio.WindowsSelectorEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+At line:2 char:1
++ modal run engine\modal_app.py::run_model --layers "11,12,13" --prompt ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\jaber\... in Python 3.16:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+C:\Users\jaber\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\modal\_utils\async_utils.py:42: DeprecationWarning: 'asyncio.set_event_loop_policy' is 
+deprecated and slated for removal in Python 3.16
+  asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+✓ Initialized. View run at 
+https://modal.com/apps/rightnow-ai/main/ap-cEVR2yx9rDCUDtMj132Dvg
+✓ Created objects.
+├── 🔨 Created mount 
+│   C:\Users\jaber\RightNow-Full\local-kimi\engine\modal_app.py
+├── 🔨 Created mount 
+│   C:\Users\jaber\RightNow-Full\local-kimi\reference\config.json
+├── 🔨 Created mount C:\Users\jaber\RightNow-Full\local-kimi\engine\k3ref
+├── 🔨 Created function probe.
+├── 🔨 Created function fetch_layer.
+├── 🔨 Created function fetch_model_tensors.
+├── 🔨 Created function run_layer.
+├── 🔨 Created function run_reference_layer.
+└── 🔨 Created function run_model.
+{
+  "device": "NVIDIA H100 80GB HBM3",
+  "layers": [
+    11,
+    12,
+    13
+  ],
+  "prompt_token_ids": [
+    100,
+    200,
+    300,
+    400
+  ],
+  "generated_token_ids": [
+    72628,
+    50873,
+    113280,
+    67093
+  ],
+  "all_token_ids": [
+    100,
+    200,
+    300,
+    400,
+    72628,
+    50873,
+    113280,
+    67093
+  ],
+  "tokens_seen": 8,
+  "load_seconds": 20.197,
+  "generation_seconds": 11.01,
+  "peak_allocated_gb": 25.245,
+  "steps": [
+    {
+      "phase": "prefill",
+      "step": -1,
+      "layers": [
+        {
+          "layer": 11,
+          "attention": "mla",
+          "activation": {
+            "shape": [
+              1,
+              4,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": 0.0016059003537520766,
+            "std": 0.4440540075302124,
+            "rms": 0.4440491497516632,
+            "absmax": 3.78125,
+            "finite": true
+          }
+        },
+        {
+          "layer": 12,
+          "attention": "kda",
+          "activation": {
+            "shape": [
+              1,
+              4,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": -0.0013422522461041808,
+            "std": 0.13485217094421387,
+            "rms": 0.1348564773797989,
+            "absmax": 0.63671875,
+            "finite": true
+          }
+        },
+        {
+          "layer": 13,
+          "attention": "kda",
+          "activation": {
+            "shape": [
+              1,
+              4,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": -0.001753524993546307,
+            "std": 0.1447487622499466,
+            "rms": 0.14475686848163605,
+            "absmax": 0.640625,
+            "finite": true
+          }
+        }
+      ]
+    },
+    {
+      "phase": "decode",
+      "step": 0,
+      "layers": [
+        {
+          "layer": 11,
+          "attention": "mla",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": 0.00011830883886432275,
+            "std": 0.3846336305141449,
+            "rms": 0.38460686802864075,
+            "absmax": 2.546875,
+            "finite": true
+          }
+        },
+        {
+          "layer": 12,
+          "attention": "kda",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": -0.0032591146882623434,
+            "std": 0.13601155579090118,
+            "rms": 0.13604111969470978,
+            "absmax": 0.53515625,
+            "finite": true
+          }
+        },
+        {
+          "layer": 13,
+          "attention": "kda",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": -0.0033425178844481707,
+            "std": 0.14618360996246338,
+            "rms": 0.1462116241455078,
+            "absmax": 0.6171875,
+            "finite": true
+          }
+        }
+      ]
+    },
+    {
+      "phase": "decode",
+      "step": 1,
+      "layers": [
+        {
+          "layer": 11,
+          "attention": "mla",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": -0.0005524286534637213,
+            "std": 0.36985349655151367,
+            "rms": 0.36982813477516174,
+            "absmax": 2.671875,
+            "finite": true
+          }
+        },
+        {
+          "layer": 12,
+          "attention": "kda",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": 0.000520654721185565,
+            "std": 0.13666418194770813,
+            "rms": 0.13665564358234406,
+            "absmax": 0.515625,
+            "finite": true
+          }
+        },
+        {
+          "layer": 13,
+          "attention": "kda",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": 0.000462211697595194,
+            "std": 0.14674869179725647,
+            "rms": 0.1467391848564148,
+            "absmax": 0.609375,
+            "finite": true
+          }
+        }
+      ]
+    },
+    {
+      "phase": "decode",
+      "step": 2,
+      "layers": [
+        {
+          "layer": 11,
+          "attention": "mla",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": 0.0028815525583922863,
+            "std": 0.3551323115825653,
+            "rms": 0.3551192283630371,
+            "absmax": 2.3125,
+            "finite": true
+          }
+        },
+        {
+          "layer": 12,
+          "attention": "kda",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": 0.0019742806907743216,
+            "std": 0.1352337896823883,
+            "rms": 0.13523876667022705,
+            "absmax": 0.64453125,
+            "finite": true
+          }
+        },
+        {
+          "layer": 13,
+          "attention": "kda",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": 0.0017345399828627706,
+            "std": 0.14485636353492737,
+            "rms": 0.14485664665699005,
+            "absmax": 0.66015625,
+            "finite": true
+          }
+        }
+      ]
+    },
+    {
+      "phase": "decode",
+      "step": 3,
+      "layers": [
+        {
+          "layer": 11,
+          "attention": "mla",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": 0.0024366378784179688,
+            "std": 0.3553834855556488,
+            "rms": 0.3553670644760132,
+            "absmax": 2.71875,
+            "finite": true
+          }
+        },
+        {
+          "layer": 12,
+          "attention": "kda",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": -4.773374166688882e-05,
+            "std": 0.13456439971923828,
+            "rms": 0.13455501198768616,
+            "absmax": 0.5,
+            "finite": true
+          }
+        },
+        {
+          "layer": 13,
+          "attention": "kda",
+          "activation": {
+            "shape": [
+              1,
+              1,
+              7168
+            ],
+            "dtype": "torch.bfloat16",
+            "mean": -0.0003026255581062287,
+            "std": 0.14636164903640747,
+            "rms": 0.14635175466537476,
+            "absmax": 0.5546875,
+            "finite": true
+          }
+        }
+      ]
+    }
+  ],
+  "cache": [
+    {
+      "layer": 11,
+      "type": "mla",
+      "compressed_kv_shape": [
+        1,
+        8,
+        512
+      ],
+      "rotary_key_shape": [
+        1,
+        8,
+        64
+      ]
+    },
+    {
+      "layer": 12,
+      "type": "kda",
+      "recurrent_shape": [
+        1,
+        96,
+        128,
+        128
+      ],
+      "q_conv_shape": [
+        1,
+        12288,
+        4
+      ]
+    },
+    {
+      "layer": 13,
+      "type": "kda",
+      "recurrent_shape": [
+        1,
+        96,
+        128,
+        128
+      ],
+      "q_conv_shape": [
+        1,
+        12288,
+        4
+      ]
+    }
+  ]
+}
+Stopping app - local entrypoint completed.
+✓ App completed. View run at 
+https://modal.com/apps/rightnow-ai/main/ap-cEVR2yx9rDCUDtMj132Dvg
