@@ -24,6 +24,28 @@ cache and run prefill and decode directly from it. Persistently expanding to
 per-head keys and values would make the engine materially less memory-efficient
 than the buyer's existing vLLM option.
 
+### Observed cross-check on a running server
+
+The finding above is derived by reading vLLM's source. A live vLLM 0.26.0 run on
+one H200, serving this model's BF16 checkpoint, independently reports:
+
+```
+GPU KV cache size: 2,322,432 tokens
+Maximum concurrency for 8,192 tokens per request: 283.50x
+```
+
+An H200 holds 141 GB and the BF16 weights alone occupy 98.2 GB, so at most tens
+of GB remain for cache. At the expanded rate of 143,360 bytes per token,
+2,322,432 tokens would require roughly 333 GB, which is more than twice the
+whole card. The observation is therefore only consistent with the compressed
+policy, and the expanded policy is ruled out by a running server rather than
+only by reading code.
+
+This is a consistency check, not a measurement of the per-token rate. It bounds
+the answer rather than pinning it, because the same pool also holds the KDA
+recurrent state and vLLM applies its own utilization fraction. Treat it as
+corroboration of the source trace, which remains the precise statement.
+
 ## Customer-facing 32 GiB envelope
 
 **Quote this envelope:** with the MEASURED selective-INT4 weights, the
