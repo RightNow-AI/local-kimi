@@ -515,6 +515,13 @@ def _validate_successful_side(
         or not all(isinstance(item, str) and item for item in command)
     ):
         raise MeasurementRecordError("runtime.server_command must retain exact arguments")
+    disclosures = runtime.get("disclosures")
+    if disclosures is not None and (
+        not isinstance(disclosures, Sequence)
+        or isinstance(disclosures, (str, bytes))
+        or not all(isinstance(item, str) and item.strip() for item in disclosures)
+    ):
+        raise MeasurementRecordError("runtime.disclosures must be nonempty text entries")
     memory = _mapping(side.get("memory"), "side.memory")
     memory_values = {}
     for field in (
