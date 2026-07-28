@@ -268,6 +268,28 @@ def _canonical_decisions(
         "weight_names": tuple(specs_by_name),
     }
 
+    # The canonical plan takes an iterable of ITS OWN TensorMetadata, which this
+    # module has no reason to know about statically. Both types carry the same
+    # four facts, so translate rather than duplicate the type. This seam existed
+    # because the accuracy and quantization plans were written in parallel and
+    # never saw each other: the run failed with "unsupported required parameter
+    # 'tensors'". Built defensively so a canonical module without TensorMetadata
+    # still resolves through the other context keys instead of crashing here.
+    metadata_type = getattr(module, "TensorMetadata", None)
+    if callable(metadata_type):
+        translated = tuple(
+            metadata_type(
+                name=spec.name,
+                shape=tuple(spec.shape),
+                dtype=spec.dtype,
+                source_file=spec.shard,
+            )
+            for spec in specs
+        )
+        context["tensors"] = translated
+        context["metadata"] = translated
+        context["tensor_metadata"] = translated
+
     for factory_name in (
         "build_klinear_quantization_plan",
         "build_quantization_plan",
