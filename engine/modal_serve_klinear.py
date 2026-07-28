@@ -78,6 +78,14 @@ CUDA_IMAGE = (
         Path(__file__).parent / "serve",
         remote_path="/root/engine/serve",
     )
+    # engine.quant is NOT optional here. engine/klinear/quantized.py imports
+    # w4a16_linear from engine.quant.triton_w4a16, so without this mount the
+    # service cannot load the INT4 artifact it defaults to, and the failure
+    # arrives as ModuleNotFoundError after the container is already up.
+    .add_local_dir(
+        Path(__file__).parent / "quant",
+        remote_path="/root/engine/quant",
+    )
 )
 
 SMOKE_IMAGE = modal.Image.debian_slim(python_version="3.12").pip_install(
@@ -185,7 +193,11 @@ def smoke(
 
     try:
         timeout = httpx.Timeout(60 * 60, connect=60.0)
-        with httpx.Client(timeout=timeout) as client:
+        # follow_redirects is required, not cosmetic. A Modal web endpoint
+        # answers the first call with 303 and an __modal_attempt_token, and a
+        # client that does not follow it reports a redirect as a serving
+        # failure, which is a false negative about the engine.
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             non_stream_response = client.post(
                 f"{base}/v1/chat/completions",
                 json={**request, "stream": False},
