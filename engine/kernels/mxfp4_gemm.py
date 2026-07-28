@@ -201,10 +201,8 @@ def mxfp4_gemm(
     if m == 0:
         return output
 
-    grid = lambda meta: (
-        triton.cdiv(m, meta["BLOCK_M"]),
-        triton.cdiv(n, meta["BLOCK_N"]),
-    )
+    def grid(meta):
+        return (triton.cdiv(m, meta["BLOCK_M"]), triton.cdiv(n, meta["BLOCK_N"]))
     with torch.cuda.device(activations.device):
         _mxfp4_gemm_kernel[grid](
             activations,
