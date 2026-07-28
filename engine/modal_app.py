@@ -11,6 +11,7 @@ starts an 8xH200 container by autocomplete.
     modal run engine/modal_app.py::probe
     modal run engine/modal_app.py::fetch_layer --layer 12
     modal run engine/modal_app.py::run_layer --layer 12
+    modal run engine/modal_app.py::run_reference_layer --layer 12
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import json
 import os
 import struct
 import time
+from pathlib import Path
 
 import modal
 
@@ -29,7 +31,13 @@ BASE_IMAGE = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install("numpy>=2.0", "httpx>=0.27", "huggingface_hub>=0.26")
 )
-GPU_IMAGE = BASE_IMAGE.pip_install("torch>=2.5")
+GPU_IMAGE = BASE_IMAGE.pip_install("torch>=2.5").add_local_dir(
+    Path(__file__).parent / "k3ref",
+    remote_path="/root/k3ref",
+).add_local_file(
+    Path(__file__).parents[1] / "reference" / "config.json",
+    remote_path="/root/reference/config.json",
+)
 
 WEIGHTS = modal.Volume.from_name("k3-weights", create_if_missing=True)
 VOL = "/weights"
@@ -125,28 +133,31 @@ def fetch_layer(layer: int = 12, experts: int = 896) -> dict:
     from concurrent.futures import ThreadPoolExecutor
 
     wm = _index()
-    stem = f"language_model.model.layers.{layer}.block_sparse_moe"
-    shard = wm[f"{stem}.experts.0.w1.weight_packed"]
-    header, start = _header(shard)
+    layer_prefix = f"language_model.model.layers.{layer}."
     dest = f"{VOL}/layer{layer}"
     os.makedirs(dest, exist_ok=True)
 
     names: list[str] = []
-    for e in range(experts):
-        for proj in ("w1", "w2", "w3"):
-            for suffix in ("weight_packed", "weight_scale"):
-                n = f"{stem}.experts.{e}.{proj}.{suffix}"
-                if n in header:
-                    names.append(n)
-    # The per-layer skeleton: latent projections, router, shared experts, norms.
-    for n in header:
-        if ".experts." not in n and f".layers.{layer}." in n:
-            names.append(n)
+    for name in wm:
+        if not name.startswith(layer_prefix):
+            continue
+        if ".experts." in name:
+            expert_id = int(name.split(".experts.", 1)[1].split(".", 1)[0])
+            if expert_id >= experts:
+                continue
+        names.append(name)
+    names.sort()
+
+    # A K3 layer can cross shard boundaries, so resolve every layer shard first.
+    shard_data = {shard: _header(shard) for shard in {wm[name] for name in names}}
 
     def grab(name: str) -> int:
-        out = f"{dest}/{name.split('.', 3)[-1].replace('.', '__')}.bin"
-        if os.path.exists(out):
+        relative_name = name[len(layer_prefix):]
+        out = f"{dest}/{relative_name.replace('.', '__')}.bin"
+        if os.path.exists(out) and os.path.exists(out + ".meta"):
             return 0
+        shard = wm[name]
+        header, start = shard_data[shard]
         meta = header[name]
         a, b = meta["data_offsets"]
         raw = _http(f"{BASE_URL}/{shard}", (start + a, start + b - 1))
@@ -185,36 +196,27 @@ def run_layer(layer: int = 12, experts: int = 8) -> dict:
     must prove we can turn K3's packed bytes back into numbers that look like
     trained weights rather than noise.
     """
-    import numpy as np
     import torch
+
+    from k3ref.dequant import dequantize_mxfp4
+    from k3ref.weights import RawTensorStore
 
     dest = f"{VOL}/layer{layer}"
     if not os.path.isdir(dest):
         return {"error": f"{dest} missing; run fetch_layer --layer {layer} first"}
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    codes = torch.tensor(E2M1 + [-v for v in E2M1], dtype=torch.float32, device=dev)
+    store = RawTensorStore(dest)
 
-    def load(fname: str) -> tuple[torch.Tensor, dict]:
-        with open(f"{dest}/{fname}.meta", "r", encoding="utf-8") as fh:
-            meta = json.load(fh)
-        raw = np.fromfile(f"{dest}/{fname}", dtype=np.uint8)
-        return torch.from_numpy(raw.copy()).to(dev).reshape(meta["shape"]), meta
-
-    def dequant(stem: str) -> torch.Tensor:
-        packed, _ = load(f"{stem}__weight_packed.bin")
-        scale, _ = load(f"{stem}__weight_scale.bin")
-        rows, half = packed.shape
-        vals = torch.empty((rows, half * 2), dtype=torch.long, device=dev)
-        vals[:, 0::2] = (packed & 0x0F).long()
-        vals[:, 1::2] = (packed >> 4).long()
-        w = codes[vals]
-        exp = torch.exp2(scale.to(torch.int16).float() - 127.0)
-        return w * exp.repeat_interleave(w.shape[1] // scale.shape[1], dim=1)
+    def dequant(expert: int) -> torch.Tensor:
+        stem = f"layers.{layer}.block_sparse_moe.experts.{expert}.w1"
+        packed = store.load(f"{stem}.weight_packed", device=dev)
+        scale = store.load(f"{stem}.weight_scale", device=dev)
+        return dequantize_mxfp4(packed, scale)
 
     stats = []
     for e in range(experts):
-        w1 = dequant(f"experts__{e}__w1")
+        w1 = dequant(e)
         stats.append(
             {
                 "expert": e,
@@ -239,13 +241,111 @@ def run_layer(layer: int = 12, experts: int = 8) -> dict:
     return out
 
 
+@APP.function(image=GPU_IMAGE, gpu="H100", volumes={VOL: WEIGHTS}, timeout=60 * 60)
+def run_reference_layer(layer: int = 12, sequence_length: int = 2, seed: int = 0) -> dict:
+    """Run the plain PyTorch layer against fetched real weights and report activations."""
+    import torch
+
+    from k3ref.config import K3LayerConfig
+    from k3ref.layer import K3ReferenceLayer
+
+    dest = f"{VOL}/layer{layer}"
+    if not os.path.isdir(dest):
+        return {"error": f"{dest} missing; run fetch_layer --layer {layer} first"}
+    if not torch.cuda.is_available():
+        return {"error": "run_reference_layer requires a CUDA GPU"}
+
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.cuda.reset_peak_memory_stats()
+    config = K3LayerConfig.from_json("/root/reference/config.json")
+    load_started = time.time()
+    reference_layer = K3ReferenceLayer.from_directory(
+        dest,
+        layer,
+        config=config,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    load_seconds = time.time() - load_started
+    hidden_states = torch.randn(
+        1,
+        sequence_length,
+        config.hidden_size,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    attention_mask = torch.ones(
+        1, sequence_length, device="cuda", dtype=torch.long
+    )
+
+    def activation_stats(tensor: torch.Tensor) -> dict:
+        values = tensor.float()
+        return {
+            "shape": list(tensor.shape),
+            "dtype": str(tensor.dtype),
+            "mean": float(values.mean()),
+            "std": float(values.std()),
+            "rms": float(values.square().mean().sqrt()),
+            "absmax": float(values.abs().max()),
+            "finite": bool(torch.isfinite(values).all()),
+        }
+
+    forward_started = time.time()
+    with torch.inference_mode():
+        result = reference_layer(
+            hidden_states,
+            attention_mask=attention_mask,
+            return_aux=True,
+        )
+    torch.cuda.synchronize()
+    forward_seconds = time.time() - forward_started
+    selected = result.router_indices
+    router_weights = result.router_weights
+    out = {
+        "layer": layer,
+        "attention": "kda" if reference_layer.is_kda else "mla",
+        "device": torch.cuda.get_device_name(0),
+        "sequence_length": sequence_length,
+        "load_seconds": round(load_seconds, 3),
+        "forward_seconds": round(forward_seconds, 3),
+        "peak_allocated_gb": round(torch.cuda.max_memory_allocated() / 1e9, 3),
+        "input": activation_stats(hidden_states),
+        "output": activation_stats(result.hidden_states),
+        "router": {
+            "shape": list(selected.shape),
+            "unique_experts": int(selected.unique().numel()),
+            "weight_min": float(router_weights.min()),
+            "weight_max": float(router_weights.max()),
+            "weight_sum_min": float(router_weights.sum(-1).min()),
+            "weight_sum_max": float(router_weights.sum(-1).max()),
+        },
+        "block_residual_shape": (
+            list(result.block_residual.shape)
+            if result.block_residual is not None
+            else None
+        ),
+    }
+    if hasattr(result.attention_state, "recurrent"):
+        out["recurrent_state"] = activation_stats(result.attention_state.recurrent)
+    print(json.dumps(out, indent=2))
+    return out
+
+
 @APP.local_entrypoint()
-def main(action: str = "probe", layer: int = 12, experts: int = 8):
+def main(
+    action: str = "probe",
+    layer: int = 12,
+    experts: int = 8,
+    sequence_length: int = 2,
+):
     if action == "probe":
         probe.remote()
     elif action == "fetch":
         fetch_layer.remote(layer=layer)
     elif action == "run":
         run_layer.remote(layer=layer, experts=experts)
+    elif action == "reference":
+        run_reference_layer.remote(layer=layer, sequence_length=sequence_length)
     else:
-        print(f"unknown action {action!r}; use probe | fetch | run")
+        print(f"unknown action {action!r}; use probe | fetch | run | reference")
