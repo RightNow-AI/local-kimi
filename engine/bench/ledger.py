@@ -162,6 +162,62 @@ def standard_loss_ledger() -> LossLedger:
     )
 
 
+def comparison_loss_ledger(
+    metrics: dict[str, float | str],
+    *,
+    candidate_label: str,
+    reference: str,
+) -> LossLedger:
+    """Record the four observed comparison metrics without inventing totals."""
+    required = {
+        "mean_token_kl_nats",
+        "mean_token_kl_arithmetic",
+        "top1_agreement",
+        "top1_arithmetic",
+        "routing_agreement",
+        "routing_arithmetic",
+        "perplexity_relative_delta",
+        "perplexity_arithmetic",
+    }
+    missing = sorted(required - set(metrics))
+    if missing:
+        raise ValueError(f"comparison metrics are missing required fields: {missing}")
+
+    ledger = standard_loss_ledger()
+    ledger.entries = [
+        entry
+        for entry in ledger.entries
+        if entry.transformation is not Transformation.KERNEL_NUMERICS
+    ]
+    description = f"Run {candidate_label} in place of the covered HuggingFace components"
+    observed = (
+        ("mean_token_kl_nats", "mean_token_kl_arithmetic"),
+        ("top1_agreement", "top1_arithmetic"),
+        ("routing_agreement", "routing_arithmetic"),
+        ("perplexity_relative_delta", "perplexity_arithmetic"),
+    )
+    for metric, arithmetic in observed:
+        value = metrics[metric]
+        formula = metrics[arithmetic]
+        if not isinstance(value, (int, float)):
+            raise TypeError(f"comparison metric {metric} must be numeric")
+        if not isinstance(formula, str):
+            raise TypeError(f"comparison arithmetic {arithmetic} must be text")
+        ledger.add(
+            LossEntry(
+                Transformation.KERNEL_NUMERICS,
+                description,
+                metric,
+                reference,
+                MeasurementKind.MEASURED,
+                float(value),
+                formula,
+                contributes_to_total=False,
+            )
+        )
+    return ledger
+
+
 def render_ledger(ledger: LossLedger) -> str:
     """Render a ledger as an audit-friendly plain-text table."""
     return ledger.render()
