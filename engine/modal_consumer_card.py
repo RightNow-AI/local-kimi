@@ -147,7 +147,8 @@ def serve_within_budget(budget_gib: float = 32.0, max_new_tokens: int = 48) -> d
 
     torch.cuda.synchronize(device)
     record["load_seconds"] = round(time.perf_counter() - started, 2)
-    record["resident_weight_bytes"] = int(model.resident_weight_bytes())
+    resident = model.resident_weight_bytes
+    record["resident_weight_bytes"] = int(resident() if callable(resident) else resident)
     record["peak_allocated_after_load_bytes"] = int(torch.cuda.max_memory_allocated(device))
     record["peak_reserved_after_load_bytes"] = int(torch.cuda.max_memory_reserved(device))
 
