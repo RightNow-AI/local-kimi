@@ -1,10 +1,32 @@
 [project]
 name = "k3"
 version = "0.1.0"
-description = "Client presets for K3 — auto-detecting, format-correct proxy in front of a K3 inference engine."
+description = "Client presets for K3: an auto-detecting, format-correct inference proxy."
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = [
+    "coding agents",
+    "inference",
+    "Kimi K3",
+    "LLM",
+    "proxy",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -14,13 +36,27 @@ dependencies = [
     "rich>=13.7",
 ]
 
+[project.urls]
+Homepage = "https://github.com/jaberjaber23/local-kimi"
+Repository = "https://github.com/jaberjaber23/local-kimi"
+Issues = "https://github.com/jaberjaber23/local-kimi/issues"
+Changelog = "https://github.com/jaberjaber23/local-kimi/blob/main/CHANGELOG.md"
+
 [project.scripts]
 k3 = "k3.cli:main"
+
+[project.optional-dependencies]
+engine = [
+    "modal>=1.0",
+    "numpy>=2.0",
+    "torch>=2.5",
+]
 
 [dependency-groups]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
+    "ruff==0.14.14",
     # The reference generic-OpenAI client. Used by scripts/capture_openai.py to
     # record real SDK traffic rather than hand-written request bodies.
     "openai>=1.50",
@@ -36,4 +72,41 @@ packages = ["k3"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = ["-m", "not gpu and not network and not weights"]
+markers = [
+    "gpu: requires GPU hardware",
+    "network: requires access to an external network service",
+    "weights: requires local Kimi K3 model weights",
+]
 filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Existing debt in files owned by other lanes. Remove an entry when its owner fixes it.
+"k3/cli.py" = ["I001"]
+"k3/detect.py" = ["F541"]
+"k3/dialects/__init__.py" = ["I001"]
+"k3/dialects/openai_chat.py" = ["I001"]
+"k3/pipeline.py" = ["F401"]
+"k3/reasoning.py" = ["F401"]
+"k3/replay.py" = ["F401"]
+"k3/server.py" = ["I001"]
+"reference/run_oracle.py" = ["E401", "F401", "I001"]
+"research/expert_spectrum.py" = ["F401"]
+"research/verify_lossless.py" = ["F401", "F541", "F841"]
+"scripts/build_fixtures.py" = ["F401"]
+"tests/test_k3_oracle.py" = ["I001"]
+"tests/test_toolcalls_k3.py" = ["I001"]
+
+[tool.ruff.format]
+docstring-code-format = false
+indent-style = "space"
+line-ending = "auto"
+quote-style = "double"
+skip-magic-trailing-comma = false

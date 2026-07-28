@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_NO_PROGRESS: "1"
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.33"
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-suffix: py${{ matrix.python }}
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+
+      - name: Install project and development dependencies
+        run: uv sync --python ${{ matrix.python }}
+
+      - name: Run complete offline suite
+        run: uv run --no-sync python -m pytest
+
+  lint:
+    name: lint, format, and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.33"
+          python-version: "3.13"
+          enable-cache: true
+          cache-suffix: lint
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+
+      - name: Install project and development dependencies
+        run: uv sync --python 3.13
+
+      - name: Lint
+        run: uv run --no-sync ruff check .
+
+      # Existing files are intentionally not rewritten in this lane. Keep the
+      # report visible while lint and the package build remain blocking gates.
+      - name: Report formatting debt
+        continue-on-error: true
+        run: uv run --no-sync ruff format --check .
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Verify typed wheel marker
+        run: >-
+          uv run --no-sync python -c
+          "import glob, zipfile; wheel = glob.glob('dist/*.whl')[0];
+          names = zipfile.ZipFile(wheel).namelist();
+          assert 'k3/py.typed' in names, names"
