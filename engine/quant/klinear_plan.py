@@ -316,6 +316,18 @@ def _classify(
             True,
             "The first dense MLP is a large matrix bank and is part of the fit target.",
         )
+    if name.endswith("kv_a_proj_with_mqa.weight"):
+        return (
+            "MLA latent down-projection",
+            False,
+            (
+                "This projection produces the compressed KV latent that is written to "
+                "the cache, so error here persists for the whole sequence instead of "
+                "perturbing one token's activation. It is also only 576 by 2304 across "
+                "seven layers, roughly 18.6 MB in BF16, so quantizing it does nothing "
+                "for fit. Quantize for fit, not for its own sake."
+            ),
+        )
     if (
         (".self_attn." in name or ".attention." in name)
         and name.endswith("_proj.weight")
