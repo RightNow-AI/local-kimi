@@ -30,7 +30,7 @@ MAX_NUM_SEQS = 16
 MAX_NUM_BATCHED_TOKENS = 8192
 GREEDY_MAX_TOKENS = 256
 
-ENGINE_ARGUMENTS = {
+BASE_ENGINE_ARGUMENTS = {
     "trust_remote_code": True,
     "dtype": "bfloat16",
     "tensor_parallel_size": 1,
@@ -40,7 +40,6 @@ ENGINE_ARGUMENTS = {
     "gpu_memory_utilization": 0.90,
     "enforce_eager": True,
     "disable_log_stats": True,
-    "enable_return_routed_experts": True,
     "max_logprobs": -1,
     "logprobs_mode": "raw_logprobs",
     "seed": SEED,
@@ -89,6 +88,20 @@ def _sha256_json(value: Any) -> str:
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise TypeError(f"{path} must contain a JSON object")
+    return value
+
+
+def _engine_arguments(*, router_capture_enabled: bool) -> dict[str, Any]:
+    return BASE_ENGINE_ARGUMENTS | {
+        "enable_return_routed_experts": router_capture_enabled,
+    }
 
 
 def _gpu_environment() -> dict[str, Any]:
@@ -215,8 +228,34 @@ def _validate_routes(routes: np.ndarray, *, text_config) -> tuple[list[int], int
     return layer_indices, expected_topk, num_experts
 
 
-def run_side(*, model_path: Path, side: str, output_dir: Path) -> dict[str, Any]:
+def run_side(
+    *,
+    model_path: Path,
+    side: str,
+    output_dir: Path,
+    router_capture_enabled: bool,
+    router_unavailable_reason: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     os.environ["VLLM_USE_V1"] = "1"
+
+    from engine.accuracy.router_compat import validate_vllm_router_capture_config
+
+    if side not in {"bf16", "int4_dequantized"}:
+        raise ValueError("side must be bf16 or int4_dequantized")
+    if not model_path.is_dir():
+        raise FileNotFoundError(model_path)
+    config_path = model_path / "config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(config_path)
+    router_config_preflight = validate_vllm_router_capture_config(
+        _read_json(config_path),
+        config_path=config_path,
+    )
+    served_config_sha256 = _sha256_file(config_path)
+    if not router_capture_enabled and router_unavailable_reason is None:
+        raise ValueError(
+            "router capture may be disabled only with a recorded unavailability reason"
+        )
 
     import torch
     import vllm
@@ -224,10 +263,6 @@ def run_side(*, model_path: Path, side: str, output_dir: Path) -> dict[str, Any]
 
     if vllm.__version__ != VLLM_VERSION:
         raise RuntimeError(f"expected vLLM {VLLM_VERSION}, got {vllm.__version__}")
-    if side not in {"bf16", "int4_dequantized"}:
-        raise ValueError("side must be bf16 or int4_dequantized")
-    if not model_path.is_dir():
-        raise FileNotFoundError(model_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     random.seed(SEED)
@@ -236,7 +271,8 @@ def run_side(*, model_path: Path, side: str, output_dir: Path) -> dict[str, Any]
     torch.cuda.manual_seed_all(SEED)
 
     environment = _gpu_environment()
-    llm = LLM(model=str(model_path), **ENGINE_ARGUMENTS)
+    engine_arguments = _engine_arguments(router_capture_enabled=router_capture_enabled)
+    llm = LLM(model=str(model_path), **engine_arguments)
     tokenizer = llm.get_tokenizer()
     text_config = llm.model_config.hf_text_config
     vocab_size = int(getattr(text_config, "vocab_size"))
@@ -279,14 +315,35 @@ def run_side(*, model_path: Path, side: str, output_dir: Path) -> dict[str, Any]
         use_tqdm=False,
     )[0]
     gold_logprobs = _gold_logprobs(teacher_result.prompt_logprobs, teacher_token_ids)
-    routes = teacher_result.outputs[0].routed_experts
-    if routes is None:
-        raise ValueError("vLLM returned no routed-expert capture")
-    routes = np.asarray(routes)
-    layer_indices, experts_per_token, num_experts = _validate_routes(
-        routes,
-        text_config=text_config,
-    )
+    experts_per_token = int(getattr(text_config, "num_experts_per_token"))
+    num_experts = int(getattr(text_config, "num_experts"))
+    if router_capture_enabled:
+        routes = getattr(teacher_result.outputs[0], "routed_experts", None)
+        if routes is None:
+            raise ValueError("vLLM returned no routed-expert capture")
+        routes = np.asarray(routes)
+        layer_indices, captured_topk, captured_num_experts = _validate_routes(
+            routes,
+            text_config=text_config,
+        )
+        if captured_topk != experts_per_token or captured_num_experts != num_experts:
+            raise ValueError("router capture metadata disagrees with the model config")
+        router_capture = {
+            "available": True,
+            "requested": True,
+            "reason": None,
+            "preflight": router_config_preflight,
+        }
+        routed_experts = routes.tolist()
+    else:
+        layer_indices = []
+        routed_experts = None
+        router_capture = {
+            "available": False,
+            "requested": False,
+            "reason": router_unavailable_reason,
+            "preflight": router_config_preflight,
+        }
 
     distribution_token_count = ACCURACY_SCREEN_V1.distribution_positions + 1
     distribution_token_ids = teacher_token_ids[:distribution_token_count]
@@ -306,7 +363,7 @@ def run_side(*, model_path: Path, side: str, output_dir: Path) -> dict[str, Any]
     tokenizer_template = str(getattr(tokenizer, "chat_template", ""))
     protocol = {
         "vllm_version": vllm.__version__,
-        "engine_arguments": ENGINE_ARGUMENTS,
+        "engine_arguments": engine_arguments,
         "greedy_sampling": GREEDY_SAMPLING,
         "teacher_sampling": TEACHER_SAMPLING,
         "distribution_sampling": DISTRIBUTION_SAMPLING,
@@ -314,13 +371,14 @@ def run_side(*, model_path: Path, side: str, output_dir: Path) -> dict[str, Any]
         "teacher_text_sha256": teacher_text_sha256(),
         "teacher_token_ids_sha256": _sha256_json(teacher_token_ids),
         "distribution_token_ids_sha256": _sha256_json(distribution_token_ids),
+        "served_config_sha256": served_config_sha256,
         "chat_template_sha256": hashlib.sha256(tokenizer_template.encode("utf-8")).hexdigest(),
         "apply_chat_template": True,
         "add_generation_prompt": True,
         "seed": SEED,
     }
     result = {
-        "schema_version": "runinfra.kimi_linear.vllm_side.v1",
+        "schema_version": "runinfra.kimi_linear.vllm_side.v2",
         "created_at": _utc_now(),
         "side": side,
         "model_path": str(model_path),
@@ -343,8 +401,9 @@ def run_side(*, model_path: Path, side: str, output_dir: Path) -> dict[str, Any]
             "text_sha256": teacher_text_sha256(),
             "token_ids": teacher_token_ids,
             "gold_logprobs": gold_logprobs,
+            "router_capture": router_capture,
             "router_layer_indices": layer_indices,
-            "routed_experts": routes.tolist(),
+            "routed_experts": routed_experts,
         },
         "distribution": {
             "token_ids": distribution_token_ids,
@@ -365,9 +424,26 @@ def main() -> None:
     parser.add_argument("--side", required=True, choices=("bf16", "int4_dequantized"))
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--result-json", required=True, type=Path)
+    parser.add_argument(
+        "--router-unavailable-reason-json",
+        type=Path,
+        help=(
+            "Evidence from a failed router-enabled attempt. Supplying it selects "
+            "the matched metrics-only retry and records router agreement unavailable."
+        ),
+    )
     args = parser.parse_args()
 
-    result = run_side(model_path=args.model_path, side=args.side, output_dir=args.output_dir)
+    router_unavailable_reason = None
+    if args.router_unavailable_reason_json is not None:
+        router_unavailable_reason = _read_json(args.router_unavailable_reason_json)
+    result = run_side(
+        model_path=args.model_path,
+        side=args.side,
+        output_dir=args.output_dir,
+        router_capture_enabled=args.router_unavailable_reason_json is None,
+        router_unavailable_reason=router_unavailable_reason,
+    )
     args.result_json.parent.mkdir(parents=True, exist_ok=True)
     with args.result_json.open("w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2, sort_keys=True)

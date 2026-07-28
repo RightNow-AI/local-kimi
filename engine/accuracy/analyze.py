@@ -76,11 +76,24 @@ def _validate_matched_protocol(reference: dict[str, Any], candidate: dict[str, A
         raise ValueError("teacher-forced token IDs differ between sides")
     if reference["distribution"]["token_ids"] != candidate["distribution"]["token_ids"]:
         raise ValueError("distribution-probe token IDs differ between sides")
-    if (
-        reference["teacher_forced"]["router_layer_indices"]
-        != candidate["teacher_forced"]["router_layer_indices"]
-    ):
-        raise ValueError("router layer selection differs between sides")
+    reference_capture = reference["teacher_forced"]["router_capture"]
+    candidate_capture = candidate["teacher_forced"]["router_capture"]
+    for key in ("available", "requested"):
+        if reference_capture.get(key) != candidate_capture.get(key):
+            raise ValueError(f"router capture differs between sides on {key}")
+    if reference_capture.get("reason") != candidate_capture.get("reason"):
+        raise ValueError("router unavailability reason differs between sides")
+    if reference_capture.get("available"):
+        if (
+            reference["teacher_forced"]["router_layer_indices"]
+            != candidate["teacher_forced"]["router_layer_indices"]
+        ):
+            raise ValueError("router layer selection differs between sides")
+    else:
+        for side in (reference, candidate):
+            teacher = side["teacher_forced"]
+            if teacher["router_layer_indices"] or teacher["routed_experts"] is not None:
+                raise ValueError("unavailable router capture contains route samples")
 
 
 def _greedy_metrics(reference: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
@@ -227,6 +240,31 @@ def _distribution_metrics(reference: dict[str, Any], candidate: dict[str, Any]) 
 
 
 def _router_metrics(reference: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    reference_capture = reference["teacher_forced"]["router_capture"]
+    candidate_capture = candidate["teacher_forced"]["router_capture"]
+    if not reference_capture["available"] or not candidate_capture["available"]:
+        return {
+            "summary": {
+                "available": False,
+                "token_count": None,
+                "moe_layer_count": None,
+                "experts_per_token": int(
+                    reference["model_config"]["num_experts_per_token"]
+                ),
+                "set_agreement": None,
+                "comparison_basis": "unordered expert sets per token and MoE layer",
+                "reason": reference_capture["reason"],
+                "per_layer": [],
+            },
+            "raw": {
+                "available": False,
+                "reason": reference_capture["reason"],
+                "layer_indices": [],
+                "bf16": None,
+                "int4_dequantized": None,
+            },
+        }
+
     reference_routes = np.asarray(reference["teacher_forced"]["routed_experts"], dtype=np.int64)
     candidate_routes = np.asarray(candidate["teacher_forced"]["routed_experts"], dtype=np.int64)
     if reference_routes.shape != candidate_routes.shape:
@@ -259,6 +297,7 @@ def _router_metrics(reference: dict[str, Any], candidate: dict[str, Any]) -> dic
         )
     return {
         "summary": {
+            "available": True,
             "token_count": int(reference_routes.shape[0]),
             "moe_layer_count": len(layer_indices),
             "experts_per_token": topk,
@@ -267,6 +306,7 @@ def _router_metrics(reference: dict[str, Any], candidate: dict[str, Any]) -> dic
             "per_layer": per_layer,
         },
         "raw": {
+            "available": True,
             "layer_indices": layer_indices,
             "bf16": reference_routes.tolist(),
             "int4_dequantized": candidate_routes.tolist(),
@@ -353,9 +393,10 @@ def _threshold_verdict(
         {
             "name": "router_set_agreement",
             "actual": router["summary"]["set_agreement"],
-            "operator": ">=",
+            "operator": "available and >=",
             "threshold": threshold.min_router_set_agreement,
-            "pass": router["summary"]["set_agreement"] >= threshold.min_router_set_agreement,
+            "pass": bool(router["summary"]["available"])
+            and router["summary"]["set_agreement"] >= threshold.min_router_set_agreement,
         },
         {
             "name": "canonical_plan_reconciled",
@@ -387,6 +428,13 @@ def build_evidence(
     candidate = _read_json(candidate_path)
     checkpoint = _read_json(checkpoint_path)
     _validate_matched_protocol(reference, candidate)
+    served_config_sha256 = reference["protocol"]["served_config_sha256"]
+    if served_config_sha256 != checkpoint["served_bf16_checkpoint"]["config_sha256"]:
+        raise ValueError("BF16 side did not serve the checkpoint manifest's config bytes")
+    if served_config_sha256 != checkpoint["dequantized_checkpoint"]["config_sha256"]:
+        raise ValueError(
+            "INT4-dequantized side did not serve the checkpoint manifest's config bytes"
+        )
 
     greedy = _greedy_metrics(reference, candidate)
     teacher = _teacher_metrics(reference, candidate)
@@ -399,23 +447,16 @@ def build_evidence(
         router=router,
         checkpoint=checkpoint,
     )
-    router_valid = router["summary"]["set_agreement"] == 1.0
+    router_available = bool(router["summary"]["available"])
+    router_valid = router_available and router["summary"]["set_agreement"] == 1.0
 
     for artifact in distribution["artifacts"].values():
         artifact_path = Path(artifact["artifact_path"])
         artifact["relative_path"] = artifact_path.relative_to(run_root).as_posix()
 
-    source_shards = [
-        {
-            "name": item["name"],
-            "bytes": item["source_bytes"],
-            "sha256": item["source_sha256"],
-        }
-        for item in checkpoint["dequantized_checkpoint"]["shards"]
-    ]
     prompts = build_prompt_set()
     record = {
-        "schema_version": "runinfra.kimi_linear.int4_accuracy.v1",
+        "schema_version": "runinfra.kimi_linear.int4_accuracy.v2",
         "created_at": _utc_now(),
         "verdict": verdict,
         "thresholds_stated_before_measurement": ACCURACY_SCREEN_V1.as_dict(),
@@ -434,7 +475,11 @@ def build_evidence(
             "causal_interpretation": (
                 "VALID_QUANTIZATION_ONLY"
                 if router_valid
-                else "INVALID_ROUTING_CHANGED_OUTPUT_METRICS_NOT_CAUSALLY_INTERPRETABLE"
+                else (
+                    "INCOMPLETE_ROUTER_AGREEMENT_UNAVAILABLE_NO_CLEAN_PASS"
+                    if not router_available
+                    else "INVALID_ROUTING_CHANGED_OUTPUT_METRICS_NOT_CAUSALLY_INTERPRETABLE"
+                )
             ),
             "release_scope": (
                 "This is a controlled quantization-damage screen. It is not a task-level "
@@ -446,8 +491,11 @@ def build_evidence(
             "config": reference["model_config"],
         },
         "checkpoints": {
-            "bf16": checkpoint["source"] | {"shards": source_shards},
+            "published_source": checkpoint["source"],
+            "bf16": checkpoint["served_bf16_checkpoint"],
             "int4_dequantized": checkpoint["dequantized_checkpoint"],
+            "served_config_compatibility": checkpoint["served_config_compatibility"],
+            "compatibility_findings": checkpoint["compatibility_findings"],
             "codec": checkpoint["codec"],
             "plan": checkpoint["plan"],
             "router_preservation": checkpoint["router_preservation"],
@@ -531,16 +579,46 @@ def verify_evidence_record(record_path: Path, *, artifact_root: Path | None = No
         raise ValueError("INT4-dequantized perplexity does not recompute")
 
     router = raw["router"]
-    layers = router["layer_indices"]
-    reference_routes = np.asarray(router["bf16"], dtype=np.int64)[:, layers, :]
-    candidate_routes = np.asarray(router["int4_dequantized"], dtype=np.int64)[:, layers, :]
-    router_agreement = router_set_agreement(
-        reference_routes.tolist(),
-        candidate_routes.tolist(),
-        expected_experts_per_token=record["model"]["config"]["num_experts_per_token"],
-    )
-    if not _close(router_agreement, record["metrics"]["router_agreement"]["set_agreement"]):
-        raise ValueError("router agreement does not recompute from raw expert sets")
+    router_summary = record["metrics"]["router_agreement"]
+    if router_summary["available"]:
+        layers = router["layer_indices"]
+        reference_routes = np.asarray(router["bf16"], dtype=np.int64)[:, layers, :]
+        candidate_routes = np.asarray(router["int4_dequantized"], dtype=np.int64)[:, layers, :]
+        router_agreement = router_set_agreement(
+            reference_routes.tolist(),
+            candidate_routes.tolist(),
+            expected_experts_per_token=record["model"]["config"]["num_experts_per_token"],
+        )
+        if not _close(router_agreement, router_summary["set_agreement"]):
+            raise ValueError("router agreement does not recompute from raw expert sets")
+    else:
+        if router.get("available") is not False:
+            raise ValueError("router summary is unavailable but raw status is not")
+        if router.get("bf16") is not None or router.get("int4_dequantized") is not None:
+            raise ValueError("unavailable router metric contains fabricated route samples")
+        if router_summary["set_agreement"] is not None or not router_summary.get("reason"):
+            raise ValueError("unavailable router metric must carry no value and a reason")
+        router_agreement = None
+
+    compatibility = record["checkpoints"]["served_config_compatibility"]
+    if compatibility["source_checkpoint_modified"] is not False:
+        raise ValueError("evidence claims the shared source checkpoint was modified")
+    if compatibility["weight_values_changed"] is not False:
+        raise ValueError("router config alias must not be represented as a weight change")
+    if not compatibility["byte_identical_between_sides"]:
+        raise ValueError("served configs were not byte-identical between sides")
+    if compatibility["injected"] and compatibility["byte_identical_to_published_source"]:
+        raise ValueError("an injected router alias cannot be byte-identical to the source config")
+    if (
+        compatibility["bf16_served_config_sha256"]
+        != compatibility["int4_dequantized_served_config_sha256"]
+    ):
+        raise ValueError("served config digests differ between sides")
+    if (
+        record["protocol"]["served_config_sha256"]
+        != compatibility["bf16_served_config_sha256"]
+    ):
+        raise ValueError("protocol config digest does not match checkpoint evidence")
 
     root = record_path.parent if artifact_root is None else artifact_root
     artifacts = raw["distribution_artifacts"]
@@ -572,6 +650,11 @@ def verify_evidence_record(record_path: Path, *, artifact_root: Path | None = No
             item["kl_bf16_to_int4_dequantized_nats"],
         ):
             raise ValueError(f"per-position KL does not recompute at position {index + 1}")
+    router_check = next(
+        item for item in record["threshold_checks"] if item["name"] == "router_set_agreement"
+    )
+    if not router_summary["available"] and router_check["pass"]:
+        raise ValueError("unavailable router agreement cannot pass its threshold")
     recomputed_verdict = "PASS" if all(item["pass"] for item in record["threshold_checks"]) else "FAIL"
     if recomputed_verdict != record["verdict"]:
         raise ValueError("record verdict disagrees with its predeclared threshold checks")

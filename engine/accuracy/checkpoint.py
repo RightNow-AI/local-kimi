@@ -19,6 +19,7 @@ EXPECTED_MODEL_ID = "moonshotai/Kimi-Linear-48B-A3B-Instruct"
 EXPECTED_SOURCE_BYTES = 98_253_585_147
 EXPECTED_SHARD_COUNT = 20
 CHECKPOINT_MANIFEST = "accuracy_checkpoint_manifest.json"
+SERVED_BF16_MANIFEST = "accuracy_served_bf16_manifest.json"
 
 
 def _utc_now() -> str:
@@ -57,6 +58,13 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"{path} must contain a JSON object")
     return value
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
 
 
 def _read_safetensors_header(path: Path) -> dict[str, Any]:
@@ -167,6 +175,95 @@ def _copy_auxiliary_files(source_dir: Path, target_dir: Path) -> None:
         shutil.copy2(source, target)
 
 
+def _write_served_config(target_dir: Path, served_config: dict[str, Any]) -> str:
+    config_path = target_dir / "config.json"
+    _write_json(config_path, served_config)
+    return _sha256_file(config_path)
+
+
+def _prepare_served_bf16_checkpoint(
+    source_dir: Path,
+    output_dir: Path,
+    *,
+    shard_names: list[str],
+    served_config: dict[str, Any],
+    source_index_sha256: str,
+) -> dict[str, Any]:
+    """Create a config-owning BF16 view without duplicating 91.51 GiB.
+
+    Only the published checkpoint's shard files are linked. All configuration
+    and remote-code files live in the derived directory, so the vLLM alias can
+    be added without writing to the shared source volume.
+    """
+    from engine.accuracy.router_compat import validate_vllm_router_capture_config
+
+    def validate_existing() -> dict[str, Any]:
+        config_path = output_dir / "config.json"
+        if not config_path.is_file():
+            raise ValueError(f"served BF16 checkpoint is missing {config_path}")
+        preflight = validate_vllm_router_capture_config(
+            _read_json(config_path),
+            config_path=config_path,
+        )
+        for shard_name in shard_names:
+            target = output_dir / shard_name
+            expected = source_dir / shard_name
+            if not target.is_symlink():
+                raise ValueError(
+                    f"served BF16 shard must be a source-checkpoint symlink: {target}"
+                )
+            if target.resolve() != expected.resolve():
+                raise ValueError(
+                    f"served BF16 shard points to the wrong source: {target} -> {target.resolve()}"
+                )
+        manifest_path = output_dir / SERVED_BF16_MANIFEST
+        if not manifest_path.is_file():
+            raise ValueError(f"served BF16 checkpoint is missing {manifest_path}")
+        view_manifest = _read_json(manifest_path)
+        if view_manifest.get("source_index_sha256") != source_index_sha256:
+            raise ValueError("served BF16 view source index digest does not match")
+        return {
+            "path": str(output_dir),
+            "config_sha256": _sha256_file(config_path),
+            "weight_delivery": "absolute_symlinks_to_read_only_source_checkpoint",
+            "source_checkpoint_modified": False,
+            "router_capture_preflight": preflight,
+        }
+
+    if output_dir.exists():
+        _write_served_config(output_dir, served_config)
+        return validate_existing()
+
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_dir.parent / f".{output_dir.name}.partial-{uuid.uuid4().hex}"
+    temporary.mkdir(parents=False, exist_ok=False)
+    try:
+        _copy_auxiliary_files(source_dir, temporary)
+        config_sha256 = _write_served_config(temporary, served_config)
+        for shard_name in shard_names:
+            target = temporary / shard_name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to((source_dir / shard_name).resolve())
+        _write_json(
+            temporary / SERVED_BF16_MANIFEST,
+            {
+                "schema_version": "runinfra.kimi_linear.served_bf16_view.v1",
+                "created_at": _utc_now(),
+                "source_path": str(source_dir),
+                "source_index_sha256": source_index_sha256,
+                "config_sha256": config_sha256,
+                "weight_delivery": "absolute_symlinks_to_read_only_source_checkpoint",
+                "source_checkpoint_modified": False,
+                "shards": shard_names,
+            },
+        )
+        os.replace(temporary, output_dir)
+        return validate_existing()
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+
+
 def _tensor_sha256(tensor) -> str:
     import torch
 
@@ -204,6 +301,11 @@ def build_dequantized_checkpoint(source_dir: Path, output_root: Path) -> dict[st
     from safetensors.torch import save_file
 
     from engine.accuracy.plan import is_router_tensor, resolve_plan
+    from engine.accuracy.router_compat import (
+        compatibility_findings,
+        inject_vllm_router_alias,
+        validate_vllm_router_capture_config,
+    )
     from engine.quant.plan import w4a16_storage_bytes
     from engine.quant.verify import verify_round_trip
     from engine.quant.w4a16 import GROUP_SIZE, dequantise, quantise
@@ -225,6 +327,8 @@ def build_dequantized_checkpoint(source_dir: Path, output_root: Path) -> dict[st
     index = _read_json(index_path)
     config = _read_json(config_path)
     model_facts = _validate_model_contract(config)
+    served_config, alias_metadata = inject_vllm_router_alias(config)
+    served_config_preflight = validate_vllm_router_capture_config(served_config)
     shard_names = sorted(set(str(value) for value in index["weight_map"].values()))
     if len(shard_names) != EXPECTED_SHARD_COUNT:
         raise ValueError(
@@ -255,18 +359,60 @@ def build_dequantized_checkpoint(source_dir: Path, output_root: Path) -> dict[st
         f"Kimi-Linear-48B-A3B-Instruct-w4a16-dequant-{plan.digest[:12]}"
     )
     source_index_sha256 = _sha256_file(index_path)
+    served_bf16_dir = output_root / (
+        f"Kimi-Linear-48B-A3B-Instruct-bf16-served-{source_index_sha256[:12]}"
+    )
+    served_bf16 = _prepare_served_bf16_checkpoint(
+        source_dir,
+        served_bf16_dir,
+        shard_names=shard_names,
+        served_config=served_config,
+        source_index_sha256=source_index_sha256,
+    )
     existing = _validate_existing_checkpoint(
         output_dir,
         plan_digest=plan.digest,
         source_index_sha256=source_index_sha256,
     )
     if existing is not None:
+        dequantized_config_sha256 = _write_served_config(output_dir, served_config)
+        if dequantized_config_sha256 != served_bf16["config_sha256"]:
+            raise ValueError("served BF16 and INT4-dequantized config bytes differ")
+        served_bf16["shards"] = [
+            {
+                "name": item["name"],
+                "bytes": item["source_bytes"],
+                "sha256": item["source_sha256"],
+                "source_path": str(source_dir / item["name"]),
+            }
+            for item in existing["dequantized_checkpoint"]["shards"]
+        ]
+        existing["schema_version"] = "runinfra.kimi_linear.dequantized_checkpoint.v2"
+        existing["served_bf16_checkpoint"] = served_bf16
+        existing["dequantized_checkpoint"]["config_sha256"] = dequantized_config_sha256
+        existing["served_config_compatibility"] = alias_metadata | {
+            "applied_identically_to": ["bf16", "int4_dequantized"],
+            "source_config_sha256": _sha256_file(config_path),
+            "bf16_served_config_sha256": served_bf16["config_sha256"],
+            "int4_dequantized_served_config_sha256": dequantized_config_sha256,
+            "byte_identical_between_sides": True,
+            "byte_identical_to_published_source": (
+                served_bf16["config_sha256"] == _sha256_file(config_path)
+            ),
+            "source_checkpoint_modified": False,
+            "preflight": served_config_preflight,
+        }
+        existing["compatibility_findings"] = compatibility_findings()
+        _write_json(output_dir / CHECKPOINT_MANIFEST, existing)
         return existing
 
     output_root.mkdir(parents=True, exist_ok=True)
     temporary = output_root / f".{output_dir.name}.partial-{uuid.uuid4().hex}"
     temporary.mkdir(parents=False, exist_ok=False)
     _copy_auxiliary_files(source_dir, temporary)
+    dequantized_config_sha256 = _write_served_config(temporary, served_config)
+    if dequantized_config_sha256 != served_bf16["config_sha256"]:
+        raise ValueError("served BF16 and INT4-dequantized config bytes differ")
 
     selected_records = []
     selected_class_totals: dict[str, dict[str, int]] = defaultdict(
@@ -363,8 +509,18 @@ def build_dequantized_checkpoint(source_dir: Path, output_root: Path) -> dict[st
                 "saving_fraction": 1.0 - values["w4a16_bytes"] / values["bf16_bytes"],
             }
 
+        served_bf16["shards"] = [
+            {
+                "name": item["name"],
+                "bytes": item["source_bytes"],
+                "sha256": item["source_sha256"],
+                "source_path": str(source_dir / item["name"]),
+            }
+            for item in shard_records
+        ]
+
         manifest = {
-            "schema_version": "runinfra.kimi_linear.dequantized_checkpoint.v1",
+            "schema_version": "runinfra.kimi_linear.dequantized_checkpoint.v2",
             "created_at": _utc_now(),
             "complete": True,
             "model_id": EXPECTED_MODEL_ID,
@@ -381,6 +537,21 @@ def build_dequantized_checkpoint(source_dir: Path, output_root: Path) -> dict[st
                 "model_facts": model_facts,
                 "shard_count": len(shard_names),
             },
+            "served_bf16_checkpoint": served_bf16,
+            "served_config_compatibility": alias_metadata
+            | {
+                "applied_identically_to": ["bf16", "int4_dequantized"],
+                "source_config_sha256": _sha256_file(config_path),
+                "bf16_served_config_sha256": served_bf16["config_sha256"],
+                "int4_dequantized_served_config_sha256": dequantized_config_sha256,
+                "byte_identical_between_sides": True,
+                "byte_identical_to_published_source": (
+                    served_bf16["config_sha256"] == _sha256_file(config_path)
+                ),
+                "source_checkpoint_modified": False,
+                "preflight": served_config_preflight,
+            },
+            "compatibility_findings": compatibility_findings(),
             "codec": {
                 "module": "engine.quant.w4a16",
                 "weight_bits": 4,
@@ -407,13 +578,12 @@ def build_dequantized_checkpoint(source_dir: Path, output_root: Path) -> dict[st
             },
             "dequantized_checkpoint": {
                 "path": str(output_dir),
+                "config_sha256": dequantized_config_sha256,
                 "shards": shard_records,
                 "shard_manifest_sha256": _sha256_json(shard_records),
             },
         }
-        with (temporary / CHECKPOINT_MANIFEST).open("w", encoding="utf-8") as handle:
-            json.dump(manifest, handle, indent=2, sort_keys=True)
-            handle.write("\n")
+        _write_json(temporary / CHECKPOINT_MANIFEST, manifest)
         os.replace(temporary, output_dir)
         return manifest
     except BaseException:

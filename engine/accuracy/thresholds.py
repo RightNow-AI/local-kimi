@@ -38,6 +38,7 @@ ACCURACY_SCREEN_V1 = AccuracyThresholds(
     teacher_forced_max_tokens=1024,
     reasoning=(
         "Router set agreement is exact because the router is not quantized and any routing flip amplifies weight error through a different expert path.",
+        "If routed-expert capture is unavailable, the other metrics remain evidence but the screen fails because routing identity was not established.",
         "A two percent perplexity ceiling matches the conservative end of the expected four-bit quality-loss band and is only a screening gate.",
         "Top-1 and full-vocabulary KL jointly reject broad local distribution drift, while neither metric is allowed to replace later task-level evaluation.",
         "Greedy identity and first-divergence depth reject early behavioral changes that an average continuous metric can hide.",
