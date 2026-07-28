@@ -2,6 +2,11 @@
 
 ## Verdict
 
+All INT4 rows now use one named weight input:
+`MEASURED_INT4_SELECTIVE_WEIGHTS = 28,803,304,448 bytes`. This is tensor
+storage read from the built selective-INT4 artifact. It supersedes the projected
+24,561,340,864-byte flat-4-bit estimate.
+
 There are two real MLA cache policies for this model:
 
 | Implementation | Cache policy | BF16 bytes per token across 7 MLA layers | Status |
@@ -9,34 +14,82 @@ There are two real MLA cache policies for this model:
 | Hugging Face reference | Expanded per-head keys and values | 143,360 | SOURCE-DERIVED, NOT MEASURED |
 | vLLM 0.26.0 `FLASH_ATTN_MLA` | Compressed latent plus rotary key | 8,064 | SOURCE-DERIVED, NOT MEASURED |
 
-vLLM stores one 576-element record per token per MLA layer: 512 compressed latent
-elements plus 64 rotary-key elements. At BF16 this is 1,152 bytes per layer and
-8,064 bytes across the model's seven MLA layers.
+vLLM stores one 576-element record per token per MLA layer: 512 compressed
+latent elements plus 64 rotary-key elements. At BF16 this is 1,152 bytes per
+layer and 8,064 bytes across the model's seven MLA layers.
 
-The compressed-latent cache is table stakes rather than an advantage over vLLM.
-Our engine must preserve the 512 plus 64 representation in persistent cache and run
-prefill and decode directly from it. Persistently expanding to per-head keys and values
-would make the engine materially less memory-efficient than the buyer's existing vLLM
-option.
+The compressed-latent cache is table stakes rather than an advantage over
+vLLM. Our engine must preserve the 512 plus 64 representation in persistent
+cache and run prefill and decode directly from it. Persistently expanding to
+per-head keys and values would make the engine materially less memory-efficient
+than the buyer's existing vLLM option.
 
-Under INT4 weights and the explicit 3 GiB operational reserve:
+## Customer-facing 32 GiB envelope
 
-| Envelope | Expanded total | Compressed total | 32 GiB result | Status |
+**Quote this envelope:** with the MEASURED selective-INT4 weights, the
+compressed-latent cache, and the explicit PROJECTED 3 GiB operational reserve,
+a 32 GiB card supports `max_num_seqs=7` at `max_model_len=32,768`.
+
+This report uses 32K as the explicit useful-context threshold for that quote.
+The exact total is 34,181,581,824 bytes, leaving 178,156,544 bytes of arithmetic
+slack. `8 x 32K` does not fit.
+
+| Envelope | Expanded total | Compressed total | 32 GiB compressed result | Status |
 |---|---:|---:|---|---|
-| `1 x 32K` | 32,524,095,936 bytes | 28,090,716,608 bytes | Both fit | PROJECTED, NOT MEASURED |
-| `16 x 32K` | 103,647,039,936 bytes | 32,712,970,688 bytes | Compressed only | PROJECTED, NOT MEASURED |
-| `21 x 32K` | 127,354,687,936 bytes | 34,253,722,048 bytes | Compressed only, near limit | PROJECTED, NOT MEASURED |
-| `1 x 1M` | 178,150,330,816 bytes | 36,282,192,320 bytes | Neither fits | PROJECTED, NOT MEASURED |
+| `1 x 32K` | 36,766,059,520 | 32,332,680,192 | Fits by 2,027,058,176 bytes | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and total |
+| `7 x 32K` | 65,215,237,120 | 34,181,581,824 | Fits by 178,156,544 bytes | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and total |
+| `8 x 32K` | 69,956,766,720 | 34,489,732,096 | Exceeds by 129,993,728 bytes | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and total |
+| `16 x 32K` | 107,889,003,520 | 36,954,934,272 | Exceeds by 2,595,195,904 bytes | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and total |
+| `1 x 1M` | 182,392,294,400 | 40,524,155,904 | Exceeds by 6,164,417,536 bytes | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and total |
 
-The exact compressed-policy 32 GiB capacity at 32K is 21 sequences under this
-headroom policy. A single 1M sequence still misses 32 GiB, but reaches 48 GiB.
+The exact compressed-policy concurrency tradeoff on 32 GiB is:
+
+| Context per sequence | Maximum `max_num_seqs` | Total bytes | Slack bytes | Status |
+|---:|---:|---:|---:|---|
+| 8,192 | 21 | 34,333,887,488 | 25,850,880 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and total |
+| 16,384 | 13 | 34,312,915,968 | 46,822,400 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and total |
+| 32,768 | 7 | 34,181,581,824 | 178,156,544 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and total |
+| 65,536 | 4 | 34,314,095,616 | 45,642,752 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and total |
+| 131,072 | 2 | 34,226,277,376 | 133,460,992 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and total |
+
+## Auditable corrections
+
+| Input or result | Superseded value | Current value | Difference | Status |
+|---|---:|---:|---:|---|
+| Selective INT4 resident tensor storage | 24,561,340,864 | 28,803,304,448 | +4,241,963,584 | Old PROJECTED and superseded; current MEASURED |
+| BF16 resident tensor storage | 98,245,363,456 | 98,245,528,576 | +165,120 | Old PROJECTED arithmetic; current MEASURED |
+| Compressed `16 x 32K` total | 32,712,970,688 | 36,954,934,272 | +4,241,963,584 | MEASURED weight correction; SOURCE-DERIVED state; PROJECTED reserve and total |
+
+The user's recompute was exact. The entire `16 x 32K` change is the measured
+weight delta because the state shapes, dtypes, cache policy, and headroom policy
+did not change.
 
 ## Evidence status
 
-- `SOURCE-DERIVED` means a tensor shape, dtype, or page formula was read from pinned source.
-- `PROJECTED, NOT MEASURED` means exact arithmetic or an explicit policy reserve was applied.
-- `MEASURED` is reserved for output from `engine/modal_residency.py`.
-- No GPU, vLLM server, test runner, or Modal job was run in this lane.
+- `MEASURED` means bytes were read from real tensor storage or a real allocator.
+  It does not by itself mean the complete live server was measured.
+- `SOURCE-DERIVED` means a tensor shape, dtype, or cache-page formula was read
+  from pinned source.
+- `PROJECTED` means exact arithmetic or an explicit policy reserve was applied.
+- No GPU, vLLM server, test runner, or Modal job was run in this residency update.
+  The weight measurement was produced by the quantization lane and consumed here.
+
+## Weight artifact trail
+
+The authoritative artifact report is `engine/quant/QUANTIZATION-RESULTS.md` on
+main. It records an H100 build from the real BF16 checkpoint.
+
+| Artifact quantity | Bytes | Used for live weight residency | Status |
+|---|---:|:---:|---|
+| Source tensor storage, BF16 as shipped | 98,245,528,576 | Yes, BF16 profile | MEASURED |
+| Output tensor storage, selective INT4 | 28,803,304,448 | Yes, INT4 profile | MEASURED |
+| Output safetensors files | 28,809,016,344 | No, disk artifact size | MEASURED |
+| Output directory including support files | 28,840,764,112 | No, disk artifact size | MEASURED |
+
+The selective format is symmetric signed INT4, group size 32, with BF16 scales
+and no zero point. It costs 4.5 bits per quantized parameter including scales.
+The measured tensor-storage figure already includes the classes deliberately
+retained in source precision.
 
 ## Which policy belongs to which implementation
 
@@ -45,9 +98,10 @@ headroom policy. A single 1M sequence still misses 32 GiB, but reaches 48 GiB.
 | `expanded` | 32 keys of width 192 plus 32 values of width 128 | Hugging Face `modeling_kimi.py` | SOURCE-DERIVED, NOT MEASURED |
 | `compressed_latent` | One width-576 record containing width-512 latent and width-64 rotary key | vLLM 0.26.0 MLA cache | SOURCE-DERIVED, NOT MEASURED |
 
-The two policies are exposed explicitly through `MLACachePolicy` in `budget.py`.
-The default remains `expanded` for backward compatibility with the original conservative
-report. Product and vLLM comparisons must select `compressed_latent` explicitly.
+The two policies are explicit through `MLACachePolicy` in `budget.py`. The
+default remains `expanded` for backward compatibility with the original
+conservative report. Product and vLLM comparisons must select
+`compressed_latent` explicitly.
 
 ## Hugging Face source trail
 
@@ -80,9 +134,12 @@ The model delegates KDA and convolution allocation to unpinned `fla-core`. The
 allocation was traced into FLA commit
 `9c8e42e762fce087c27b673af4922795d9edb85e`:
 
-- `fla/ops/common/chunk_delta_h.py` lines 690 to 707 allocate the FP32 recurrent state.
-- `fla/ops/kda/fused_recurrent.py` lines 271 to 278 allocate the recurrent decode state.
-- `fla/modules/conv/short_conv.py` lines 211 to 217 allocate full-width conv caches.
+- `fla/ops/common/chunk_delta_h.py` lines 690 to 707 allocate the FP32 recurrent
+  state.
+- `fla/ops/kda/fused_recurrent.py` lines 271 to 278 allocate the recurrent
+  decode state.
+- `fla/modules/conv/short_conv.py` lines 211 to 217 allocate full-width conv
+  caches.
 
 The decisive FLA excerpts are:
 
@@ -106,19 +163,22 @@ The vLLM files were fetched with Python `urllib` from tag `v0.26.0`, commit
 
 The exact vLLM line chain is:
 
-1. `kimi_linear.py` lines 217 to 220 build a width-576 K/V A projection, and lines
-   264 to 274 pass `kv_lora_rank` and `qk_rope_head_dim` into the MLA wrapper.
-2. `layers/mla.py` lines 154 to 157 split the projected record into width 512 and 64,
-   then lines 175 to 179 pass both compressed parts into `MLAAttention`.
-3. `mla_attention.py` lines 388 to 392 set cache head size to 512 plus 64 and set one
-   KV head. Lines 1075 to 1085 create `MLAAttentionSpec` with that head size.
-4. `kv_cache_interface.py` lines 398 to 415 compute MLA page bytes as block size,
-   one KV head, head size, and dtype size. Unlike ordinary attention, there is no
-   separate key-plus-value factor of two.
+1. `kimi_linear.py` lines 217 to 220 build a width-576 K/V A projection, and
+   lines 264 to 274 pass `kv_lora_rank` and `qk_rope_head_dim` into the MLA
+   wrapper.
+2. `layers/mla.py` lines 154 to 157 split the projected record into width 512
+   and 64, then lines 175 to 179 pass both compressed parts into
+   `MLAAttention`.
+3. `mla_attention.py` lines 388 to 392 set cache head size to 512 plus 64 and
+   set one KV head. Lines 1075 to 1085 create `MLAAttentionSpec` with that head
+   size.
+4. `kv_cache_interface.py` lines 398 to 415 compute MLA page bytes as block
+   size, one KV head, head size, and dtype size. Unlike ordinary attention,
+   there is no separate key-plus-value factor of two.
 5. `flashattn_mla.py` lines 43 to 65 identify the selected backend as
    `FLASH_ATTN_MLA`. Lines 338 to 339 split its live cache at `kv_lora_rank`.
-6. `torch_utils.py` lines 395 to 401 resolve `cache_dtype=auto` to the model dtype,
-   which is BF16 for this model.
+6. `torch_utils.py` lines 395 to 401 resolve `cache_dtype=auto` to the model
+   dtype, which is BF16 for this model.
 
 Short exact excerpts are:
 
@@ -143,93 +203,102 @@ From the selected backend:
 The budget treats `max_num_seqs` as fixed server pool capacity. State dtypes are
 FP32 recurrent, BF16 convolution, and BF16 MLA unless explicitly replaced.
 
-| Component | Exact formula | Rate | Status |
+| Component | Exact formula or named input | Rate | Status |
 |---|---|---:|---|
-| INT4 weights | pinned profile | 24,561,340,864 bytes | PROJECTED, NOT MEASURED |
-| BF16 weights | 49,122,681,728 parameters times 2 | 98,245,363,456 bytes | PROJECTED, NOT MEASURED |
+| Selective INT4 weights | `MEASURED_INT4_SELECTIVE_WEIGHTS` | 28,803,304,448 bytes | MEASURED |
+| BF16 weights | `MEASURED_BF16_WEIGHTS` | 98,245,528,576 bytes | MEASURED |
 | KDA recurrent pool | `20 * seqs * 32 * 128 * 128 * 4` | 41,943,040 bytes per sequence | SOURCE-DERIVED, NOT MEASURED |
 | Short conv pool | `20 * seqs * 3 * 4096 * 4 * 2` | 1,966,080 bytes per sequence | SOURCE-DERIVED, NOT MEASURED |
 | Expanded MLA | `7 * seqs * tokens * 32 * (192 + 128) * 2` | 143,360 bytes per token per sequence | SOURCE-DERIVED, NOT MEASURED |
 | Compressed MLA | `7 * seqs * tokens * (512 + 64) * 2` | 8,064 bytes per token per sequence | SOURCE-DERIVED, NOT MEASURED |
-| Activation reserve | explicit report policy | 2,147,483,648 bytes | PROJECTED, NOT MEASURED |
-| Workspace reserve | explicit report policy | 1,073,741,824 bytes | PROJECTED, NOT MEASURED |
+| Activation reserve | `DEFAULT_HEADROOM.activation_bytes` | 2,147,483,648 bytes | PROJECTED POLICY, NOT MEASURED |
+| Workspace reserve | `DEFAULT_HEADROOM.workspace_bytes` | 1,073,741,824 bytes | PROJECTED POLICY, NOT MEASURED |
 
-The expanded policy costs exactly 17.7778 times the compressed policy per token.
-The 3 GiB operational reserve is a visible policy input, not a measurement.
+The expanded policy costs exactly 17.7778 times the compressed policy per
+token. `DEFAULT_HEADROOM` is an explicit 3 GiB policy input. It is not a
+measured peak and is never folded invisibly into another component.
 
-## Projected frontier side by side
+## Frontier side by side
 
 Policy for every row:
 
 - Card labels are binary GiB capacities.
-- Operational reserve is 2 GiB activation plus 1 GiB workspace.
+- Operational reserve is the PROJECTED `DEFAULT_HEADROOM`: 2 GiB activation
+  plus 1 GiB workspace.
 - Sequence candidates are `1, 2, 4, 8, 16, 32, 64, 128, 256`.
 - Each `S:L` pair means `max_num_seqs=S`, maximum `max_model_len=L`.
 - Dominated points are omitted.
 - Model length is capped at 1,048,576.
+- Weights are MEASURED, state rates are SOURCE-DERIVED, and the resulting
+  envelope is PROJECTED rather than end-to-end measured.
 
 ### 24 GiB
 
 | Weights | Expanded frontier | Compressed frontier | Status |
 |---|---|---|---|
-| INT4 | none | none | PROJECTED, NOT MEASURED |
-| BF16 | none | none | PROJECTED, NOT MEASURED |
+| Selective INT4 | none | none | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| BF16 | none | none | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
 
-INT4 weights plus the operational reserve already require 25.875 GiB before state.
+Selective INT4 weights plus `DEFAULT_HEADROOM` require 32,024,529,920 bytes
+before any sequence state, so 24 GiB cannot boot this budget.
 
 ### 32 GiB
 
 | Weights | Expanded frontier | Compressed frontier | Status |
 |---|---|---|---|
-| INT4 | `1:45,572; 2:22,633; 4:11,163; 8:5,428; 16:2,561; 32:1,127; 64:410; 128:52` | `1:810,176; 2:402,365; 4:198,460; 8:96,507; 16:45,531; 32:20,043; 64:7,299; 128:926` | PROJECTED, NOT MEASURED |
-| BF16 | none | none | PROJECTED, NOT MEASURED |
+| Selective INT4 | `1:15,982; 2:7,838; 4:3,765; 8:1,729; 16:711; 32:202` | `1:284,139; 2:139,347; 4:66,951; 8:30,752; 16:12,653; 32:3,604` | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| BF16 | none | none | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
 
 ### 48 GiB
 
 | Weights | Expanded frontier | Compressed frontier | Status |
 |---|---|---|---|
-| INT4 | `1:165,409; 2:82,551; 4:41,122; 8:20,408; 16:10,050; 32:4,872; 64:2,283; 128:988; 256:341` | `2:1,048,576; 4:731,070; 8:362,812; 16:178,683; 32:86,619; 64:40,587; 128:17,571; 256:6,062` | PROJECTED, NOT MEASURED |
-| BF16 | none | none | PROJECTED, NOT MEASURED |
+| Selective INT4 | `1:135,820; 2:67,756; 4:33,725; 8:16,709; 16:8,201; 32:3,947; 64:1,820; 128:757; 256:225` | `2:1,048,576; 4:599,561; 8:297,057; 16:145,806; 32:70,180; 64:32,367; 128:13,461; 256:4,008` | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| BF16 | none | none | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
 
 ### 80 GiB
 
 | Weights | Expanded frontier | Compressed frontier | Status |
 |---|---|---|---|
-| INT4 | `1:405,084; 2:202,388; 4:101,041; 8:50,367; 16:25,030; 32:12,362; 64:6,027; 128:2,860; 256:1,277` | `4:1,048,576; 8:895,422; 16:444,988; 32:219,771; 64:107,163; 128:50,859; 256:22,707` | PROJECTED, NOT MEASURED |
-| BF16 | none | none | PROJECTED, NOT MEASURED |
+| Selective INT4 | `1:375,494; 2:187,594; 4:93,643; 8:46,668; 16:23,181; 32:11,437; 64:5,565; 128:2,629; 256:1,161` | `4:1,048,576; 8:829,668; 16:412,111; 32:203,333; 64:98,944; 128:46,749; 256:20,652` | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| BF16 | none | none | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
 
 ### 141 GiB
 
 | Weights | Expanded frontier | Compressed frontier | Status |
 |---|---|---|---|
-| INT4 | `1:861,963; 2:430,828; 4:215,261; 8:107,477; 16:53,585; 32:26,639; 64:13,166; 128:6,430; 256:3,061` | `8:1,048,576; 16:952,632; 32:473,593; 64:234,074; 128:114,314; 256:54,434` | PROJECTED, NOT MEASURED |
-| BF16 | `1:347,984; 2:173,839; 4:86,766; 8:43,230; 16:21,461; 32:10,577; 64:5,135; 128:2,414; 256:1,054` | `4:1,048,576; 8:768,535; 16:381,545; 32:188,049; 64:91,302; 128:42,928; 256:18,741` | PROJECTED, NOT MEASURED |
+| Selective INT4 | `1:832,374; 2:416,033; 4:207,863; 8:103,778; 16:51,736; 32:25,714; 64:12,704; 128:6,199; 256:2,946` | `8:1,048,576; 16:919,755; 32:457,155; 64:225,855; 128:110,204; 256:52,379` | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| BF16 | `1:347,983; 2:173,838; 4:86,766; 8:43,229; 16:21,461; 32:10,577; 64:5,135; 128:2,414; 256:1,054` | `4:1,048,576; 8:768,532; 16:381,543; 32:188,049; 64:91,302; 128:42,928; 256:18,741` | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
 
-## Advertised 1M context
+## Advertised 1,048,576-token context
 
-This table uses exact integer sequence counts rather than the powers-of-two frontier grid.
+This table uses exact integer sequence counts rather than the powers-of-two
+frontier grid.
 
 | Capacity | Weights | Expanded max sequences at 1M | Compressed max sequences at 1M | Status |
 |---:|---|---:|---:|---|
-| 24 GiB | INT4 | 0 | 0 | PROJECTED, NOT MEASURED |
-| 24 GiB | BF16 | 0 | 0 | PROJECTED, NOT MEASURED |
-| 32 GiB | INT4 | 0 | 0 | PROJECTED, NOT MEASURED |
-| 32 GiB | BF16 | 0 | 0 | PROJECTED, NOT MEASURED |
-| 48 GiB | INT4 | 0 | 2 | PROJECTED, NOT MEASURED |
-| 48 GiB | BF16 | 0 | 0 | PROJECTED, NOT MEASURED |
-| 80 GiB | INT4 | 0 | 6 | PROJECTED, NOT MEASURED |
-| 80 GiB | BF16 | 0 | 0 | PROJECTED, NOT MEASURED |
-| 141 GiB | INT4 | 0 | 14 | PROJECTED, NOT MEASURED |
-| 141 GiB | BF16 | 0 | 5 | PROJECTED, NOT MEASURED |
+| 24 GiB | Selective INT4 | 0 | 0 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| 24 GiB | BF16 | 0 | 0 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| 32 GiB | Selective INT4 | 0 | 0 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| 32 GiB | BF16 | 0 | 0 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| 48 GiB | Selective INT4 | 0 | 2 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| 48 GiB | BF16 | 0 | 0 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| 80 GiB | Selective INT4 | 0 | 6 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| 80 GiB | BF16 | 0 | 0 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| 141 GiB | Selective INT4 | 0 | 14 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
+| 141 GiB | BF16 | 0 | 5 | MEASURED weights; SOURCE-DERIVED state; PROJECTED reserve and envelope |
 
-The 1M context is therefore reachable under the compressed policy on 48 GiB and larger
-INT4 configurations in this set, and on 141 GiB with BF16 weights. It is not reachable
-under the expanded policy on any requested card.
+The advertised 1,048,576-token context is reachable under the compressed policy
+on 48 GiB with `max_num_seqs=2`, on 80 GiB with `max_num_seqs=6`, and on
+141 GiB with `max_num_seqs=14`, all using the measured selective-INT4 weights.
+It is also reachable on 141 GiB with measured BF16 weights at
+`max_num_seqs=5`. It is not reachable under the expanded policy on any card in
+this set.
 
 ## Modal measurement contract
 
-`engine/modal_residency.py` now accepts `expanded` or `compressed_latent`. It allocates
-the selected persistent layout as separate GPU tensors and emits:
+`engine/modal_residency.py` accepts `expanded` or `compressed_latent`. It
+allocates the selected persistent layout as separate GPU tensors and emits:
 
 - predicted state-pool bytes from `budget.py`;
 - tensor storage bytes from `numel * element_size`;
@@ -238,21 +307,27 @@ the selected persistent layout as separate GPU tensors and emits:
 - signed allocated and reserved deltas from prediction;
 - `MATCH`, `MISMATCH`, or `OOM` for every point.
 
-The harness defaults to `compressed_latent`, matching vLLM 0.26.0. It does not load
-weights, so weight bytes and operational reserves remain projected.
+The harness defaults to `compressed_latent`, matching vLLM 0.26.0. It does not
+load weights. The weight byte input is MEASURED artifact tensor storage, but the
+complete live-server total remains PROJECTED because weight loading, allocator
+interaction, activations, and workspace are not jointly measured by this job.
 
 ## Remaining risks
 
-- No GPU job was run, so allocator behavior and operational headroom remain unmeasured.
-- vLLM's per-token MLA page formula is source-derived, but real allocation rounds to
-  cache blocks and is sized by the engine's global cache allocator rather than this
-  dense envelope abstraction.
-- `cache_dtype=auto` resolves to the model dtype. Explicit cache quantization would
-  change the byte rate and requires its own backend-compatible policy.
-- The model asks users to install the latest `fla-core` rather than pinning a version.
-  Future KDA or convolution allocation changes can invalidate that state contract.
-- The INT4 profile is exact four-bit parameter arithmetic. A real artifact can add
-  scales, zero points, alignment, and metadata.
-- The activation and workspace reserves are policy values, not measured peaks.
-- Frontier labels follow the repo's binary GiB convention. Production gating must use
-  the device's actual byte capacity.
+- No full server boot or GPU residency run was performed in this update, so the
+  complete live allocation remains unmeasured.
+- vLLM's per-token MLA page formula is source-derived, but real allocation
+  rounds to cache blocks and is sized by the engine's global cache allocator
+  rather than this dense envelope abstraction.
+- `cache_dtype=auto` resolves to the model dtype. Explicit cache quantization
+  would change the byte rate and requires its own backend-compatible policy.
+- The model asks users to install the latest `fla-core` rather than pinning a
+  version. Future KDA or convolution allocation changes can invalidate that
+  state contract.
+- Tensor storage is the correct persistent weight input, but a real loader may
+  create transient copies or framework metadata allocations. Those are not in
+  the measured weight bytes.
+- The 3 GiB activation and workspace reserve is a policy value, not a measured
+  peak.
+- Frontier labels follow the repo's binary GiB convention. Production gating
+  must use the device's actual byte capacity.

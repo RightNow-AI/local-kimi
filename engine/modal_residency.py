@@ -4,7 +4,8 @@ The default policy is vLLM's compressed latent cache. Pass ``expanded`` to
 measure the Hugging Face reference layout instead. The default points end with
 the disputed ``16 x 32K`` envelope. This harness intentionally does not load
 model weights, so its measured comparison is against ``state_pool_bytes`` only.
-Weight bytes and operational headroom remain projected fields in the JSON.
+Weight bytes come from measured artifact tensor storage but are not allocated by
+this job. Operational headroom remains a projected policy field in the JSON.
 
 Run only through the orchestrator:
 
@@ -305,7 +306,8 @@ def measure_residency(
             "torch_version": torch.__version__,
         },
         "measurement_scope": (
-            "persistent state tensors only; weights, activations, and workspace are projected"
+            "persistent state tensors only; measured artifact weight bytes are not "
+            "allocated; activations and workspace are projected policy reserves"
         ),
         "state_dtypes": {
             "recurrent": recurrent_dtype,

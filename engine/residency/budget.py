@@ -1,4 +1,4 @@
-"""Projected GPU residency budget for Kimi-Linear-48B-A3B-Instruct.
+"""GPU residency budget for Kimi-Linear-48B-A3B-Instruct.
 
 The persistent state shapes are derived from the model repository at revision
 e1df551a447157d4658b573f9a695d57658590e9 and from the unpinned ``fla-core``
@@ -6,9 +6,11 @@ dependency at revision 9c8e42e762fce087c27b673af4922795d9edb85e. The
 compressed MLA policy is derived from vLLM 0.26.0 at revision
 568afb3a13806beb53bb2e6bd518269357b237c0.
 
-This module performs byte arithmetic only. It does not claim that a projected
-envelope was measured or that an engine can serve it until the Modal harness
-has produced a matching allocation result.
+The shipped BF16 and selective INT4 weight profiles are measured tensor-storage
+inputs. Persistent state rates are source-derived, and operational headroom is
+an explicit projected policy. This module performs byte arithmetic only. It
+does not claim that a full live-server envelope was measured or can be served
+until the Modal harness and an engine boot produce matching allocation results.
 """
 
 from __future__ import annotations
@@ -83,32 +85,49 @@ VLLM_MLA_CACHE_POLICY = MLACachePolicy.COMPRESSED_LATENT
 
 @dataclass(frozen=True, slots=True)
 class QuantizationProfile:
-    """Exact resident weight bytes supplied by a weight format profile."""
+    """Resident weight bytes supplied by a named weight format profile."""
 
     key: str
     label: str
     weight_bytes: int
+    evidence_status: str = "PROJECTED"
 
     def __post_init__(self) -> None:
         if not self.key or not self.label:
             raise ValueError("quantization profile key and label cannot be empty")
         if self.weight_bytes <= 0:
             raise ValueError("weight_bytes must be positive")
+        if self.evidence_status not in {"MEASURED", "PROJECTED"}:
+            raise ValueError("weight evidence_status must be MEASURED or PROJECTED")
 
 
-BF16_WEIGHTS = QuantizationProfile(
-    key="bf16",
-    label="BF16 weights",
-    weight_bytes=98_245_363_456,
+MEASURED_BF16_WEIGHTS = QuantizationProfile(
+    key="bf16-as-shipped-measured",
+    label="BF16 source tensor storage as shipped",
+    weight_bytes=98_245_528_576,
+    evidence_status="MEASURED",
 )
-INT4_WEIGHTS = QuantizationProfile(
-    key="int4",
-    label="INT4 weight-only",
+MEASURED_INT4_SELECTIVE_WEIGHTS = QuantizationProfile(
+    key="int4-selective-measured",
+    label="Selective INT4 output tensor storage",
+    weight_bytes=28_803_304_448,
+    evidence_status="MEASURED",
+)
+SUPERSEDED_FLAT_INT4_WEIGHTS = QuantizationProfile(
+    key="int4-flat-4bit-superseded",
+    label="Superseded flat 4.0-bit whole-model arithmetic",
     weight_bytes=24_561_340_864,
+    evidence_status="PROJECTED",
 )
+
+# Compatibility aliases now resolve to the measured tensor-storage profiles.
+BF16_WEIGHTS = MEASURED_BF16_WEIGHTS
+INT4_WEIGHTS = MEASURED_INT4_SELECTIVE_WEIGHTS
 QUANTIZATION_PROFILES = {
-    BF16_WEIGHTS.key: BF16_WEIGHTS,
-    INT4_WEIGHTS.key: INT4_WEIGHTS,
+    "bf16": MEASURED_BF16_WEIGHTS,
+    MEASURED_BF16_WEIGHTS.key: MEASURED_BF16_WEIGHTS,
+    "int4": MEASURED_INT4_SELECTIVE_WEIGHTS,
+    MEASURED_INT4_SELECTIVE_WEIGHTS.key: MEASURED_INT4_SELECTIVE_WEIGHTS,
     "int4-weight-only": INT4_WEIGHTS,
 }
 
@@ -185,7 +204,7 @@ DEFAULT_HEADROOM = RuntimeHeadroom()
 
 @dataclass(frozen=True, slots=True)
 class ResidencyBreakdown:
-    """A complete projected byte breakdown for one server envelope."""
+    """A complete mixed-evidence byte breakdown for one server envelope."""
 
     quantization_profile: str
     mla_cache_policy: str
@@ -193,6 +212,7 @@ class ResidencyBreakdown:
     max_model_len: int
     state_dtypes: StateDTypes
     weights_bytes: int
+    weights_evidence_status: str
     kda_recurrent_state_bytes: int
     short_conv_state_bytes: int
     mla_kv_cache_bytes: int
@@ -389,6 +409,7 @@ def build_residency_budget(
         max_model_len=max_model_len,
         state_dtypes=state_dtypes,
         weights_bytes=profile.weight_bytes,
+        weights_evidence_status=profile.evidence_status,
         kda_recurrent_state_bytes=recurrent,
         short_conv_state_bytes=conv,
         mla_kv_cache_bytes=mla,

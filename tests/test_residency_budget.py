@@ -4,8 +4,11 @@ import pytest
 
 from engine.residency.budget import (
     BF16,
+    GIB,
     INT4_WEIGHTS,
     KIMI_LINEAR_SHAPE,
+    MEASURED_INT4_SELECTIVE_WEIGHTS,
+    SUPERSEDED_FLAT_INT4_WEIGHTS,
     MLACachePolicy,
     ResidencyBudgetExceeded,
     RuntimeHeadroom,
@@ -105,6 +108,31 @@ def test_mla_cache_policies_have_distinct_source_derived_token_costs() -> None:
     assert compressed_budget.mla_kv_cache_bytes == compressed
 
 
+def test_measured_int4_profile_is_named_and_changes_the_frontier() -> None:
+    assert INT4_WEIGHTS is MEASURED_INT4_SELECTIVE_WEIGHTS
+    assert MEASURED_INT4_SELECTIVE_WEIGHTS.key == "int4-selective-measured"
+    assert MEASURED_INT4_SELECTIVE_WEIGHTS.weight_bytes == 28_803_304_448
+    assert MEASURED_INT4_SELECTIVE_WEIGHTS.evidence_status == "MEASURED"
+
+    measured = solve_residency_frontier(
+        32 * GIB,
+        MEASURED_INT4_SELECTIVE_WEIGHTS,
+        max_num_seqs_values=(8,),
+        mla_cache_policy=MLACachePolicy.COMPRESSED_LATENT,
+    )
+    superseded = solve_residency_frontier(
+        32 * GIB,
+        SUPERSEDED_FLAT_INT4_WEIGHTS,
+        max_num_seqs_values=(8,),
+        mla_cache_policy=MLACachePolicy.COMPRESSED_LATENT,
+    )
+
+    assert len(measured) == len(superseded) == 1
+    assert measured[0].max_model_len == 30_752
+    assert superseded[0].max_model_len == 96_507
+    assert measured[0].max_model_len < superseded[0].max_model_len
+
+
 def test_solver_and_guard_never_return_an_over_budget_envelope() -> None:
     one_token = build_residency_budget(
         INT4_WEIGHTS,
@@ -139,10 +167,11 @@ def test_known_breakdown_matches_hand_computed_bytes() -> None:
         headroom=headroom,
     )
 
-    assert budget.weights_bytes == 24_561_340_864
+    assert budget.weights_bytes == 28_803_304_448
+    assert budget.weights_evidence_status == "MEASURED"
     assert budget.kda_recurrent_state_bytes == 83_886_080
     assert budget.short_conv_state_bytes == 3_932_160
     assert budget.mla_kv_cache_bytes == 293_601_280
     assert budget.activation_headroom_bytes == 1_234
     assert budget.workspace_headroom_bytes == 5_678
-    assert budget.total_bytes == 24_942_767_296
+    assert budget.total_bytes == 29_184_730_880
