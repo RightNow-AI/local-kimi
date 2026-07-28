@@ -1,5 +1,31 @@
 # Kimi-Linear live residency budget
 
+## The state model is MEASURED, and it is exact
+
+`engine/modal_residency.py` ran on an NVIDIA H100 80GB HBM3 (torch 2.13.0+cu130,
+CUDA 13.0) and allocated the real persistent state structures at several
+envelope points, comparing device allocation against this model's prediction.
+
+| max_num_seqs x max_model_len | predicted state pool | measured allocated delta | difference | status |
+|---|---:|---:|---:|---|
+| 1 x 32,768 | 308,150,272 | 308,150,272 | **0** | MATCH |
+| 2 x 32,768 | 439,877,632 | 439,877,632 | **0** | MATCH |
+| 8 x 32,768 | 966,787,072 | 966,787,072 | **0** | MATCH |
+
+`allocated_minus_predicted_bytes` is zero at every point. The byte model derived
+by reading Moonshot's own code predicts real GPU allocation exactly, so the KDA
+recurrent pool, the short-convolution pool and the compressed-latent MLA cache
+formulas below are correct rather than merely plausible.
+
+Reserved memory differs from allocated by the allocator's own rounding, which is
+reported separately and never smoothed into the prediction: at the three points
+above the reserved deltas were +131,072 bytes, +42,467,328 and 0.
+
+What this does NOT measure, and the report says so at each row: the weight bytes
+are not allocated by this harness, so weight figures remain MEASURED-from-artifact
+rather than measured here, and the 3 GiB operational reserve remains an explicit
+policy input rather than an observed peak.
+
 ## Verdict
 
 All INT4 rows now use one named weight input:
