@@ -7,7 +7,9 @@ import torch
 from .manifest import MXFP4_GROUP_SIZE
 
 MXFP4_EXPONENT_BIAS = 127
-MXFP4_GROUP_SIZE = 32
+# MXFP4_GROUP_SIZE is imported from .manifest, which holds the checkpoint-derived
+# facts. Defining it here as well would recreate the duplication this module
+# exists to remove.
 
 _E2M1_POSITIVE = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 _E2M1_CODEBOOK = _E2M1_POSITIVE + tuple(-value for value in _E2M1_POSITIVE)
