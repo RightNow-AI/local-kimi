@@ -59,6 +59,12 @@ def _http(url: str, rng: tuple[int, int] | None = None, retries: int = 5) -> byt
     raise RuntimeError(f"GET {url} failed: {last}")
 
 
+def _fname(tensor_name: str) -> str:
+    """Volume filename for a tensor. One definition, used by writer and reader,
+    because deriving it twice is how the two halves drift apart."""
+    return tensor_name.split(".", 3)[-1].replace(".", "__") + ".bin"
+
+
 def _index() -> dict:
     """weight_map, cached on the Volume so we fetch it once."""
     p = f"{VOL}/model.safetensors.index.json"
@@ -144,7 +150,7 @@ def fetch_layer(layer: int = 12, experts: int = 896) -> dict:
             names.append(n)
 
     def grab(name: str) -> int:
-        out = f"{dest}/{name.split('.', 3)[-1].replace('.', '__')}.bin"
+        out = f"{dest}/{_fname(name)}"
         if os.path.exists(out):
             return 0
         meta = header[name]
@@ -195,15 +201,18 @@ def run_layer(layer: int = 12, experts: int = 8) -> dict:
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     codes = torch.tensor(E2M1 + [-v for v in E2M1], dtype=torch.float32, device=dev)
 
-    def load(fname: str) -> tuple[torch.Tensor, dict]:
-        with open(f"{dest}/{fname}.meta", "r", encoding="utf-8") as fh:
+    stem = f"language_model.model.layers.{layer}.block_sparse_moe"
+
+    def load(tensor_name: str) -> tuple[torch.Tensor, dict]:
+        path = f"{dest}/{_fname(tensor_name)}"
+        with open(path + ".meta", "r", encoding="utf-8") as fh:
             meta = json.load(fh)
-        raw = np.fromfile(f"{dest}/{fname}", dtype=np.uint8)
+        raw = np.fromfile(path, dtype=np.uint8)
         return torch.from_numpy(raw.copy()).to(dev).reshape(meta["shape"]), meta
 
-    def dequant(stem: str) -> torch.Tensor:
-        packed, _ = load(f"{stem}__weight_packed.bin")
-        scale, _ = load(f"{stem}__weight_scale.bin")
+    def dequant(tensor: str) -> torch.Tensor:
+        packed, _ = load(f"{tensor}.weight_packed")
+        scale, _ = load(f"{tensor}.weight_scale")
         rows, half = packed.shape
         vals = torch.empty((rows, half * 2), dtype=torch.long, device=dev)
         vals[:, 0::2] = (packed & 0x0F).long()
@@ -214,7 +223,7 @@ def run_layer(layer: int = 12, experts: int = 8) -> dict:
 
     stats = []
     for e in range(experts):
-        w1 = dequant(f"experts__{e}__w1")
+        w1 = dequant(f"{stem}.experts.{e}.w1")
         stats.append(
             {
                 "expert": e,
