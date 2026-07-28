@@ -4,14 +4,15 @@ Nothing here runs on a laptop. Modal gives us GPUs and, more importantly, a
 persistent Volume so the 1.4 TB of weights is fetched once and reused.
 
 Cost discipline: every function declares the smallest GPU that can do its job.
-`probe` and `fetch_layer` need no GPU at all. Only `run_layer` and above touch
-one, and the full-model functions are gated behind an explicit flag so nobody
-starts an 8xH200 container by autocomplete.
+`probe`, `fetch_layer`, and `fetch_model_tensors` need no GPU. The run functions
+declare their GPU explicitly so a model launch is always an intentional command.
 
     modal run engine/modal_app.py::probe
     modal run engine/modal_app.py::fetch_layer --layer 12
     modal run engine/modal_app.py::run_layer --layer 12
     modal run engine/modal_app.py::run_reference_layer --layer 12
+    modal run engine/modal_app.py::fetch_model_tensors
+    modal run engine/modal_app.py::run_model --layers 1,2,3,4 --prompt-tokens 1,2,3
 """
 
 from __future__ import annotations
@@ -44,6 +45,14 @@ VOL = "/weights"
 
 REPO = "moonshotai/Kimi-K3"
 BASE_URL = f"https://huggingface.co/{REPO}/resolve/main"
+
+MODEL_TENSOR_NAMES = (
+    "language_model.model.embed_tokens.weight",
+    "language_model.model.norm.weight",
+    "language_model.model.output_attn_res_norm.weight",
+    "language_model.model.output_attn_res_proj.weight",
+    "language_model.lm_head.weight",
+)
 
 # The MXFP4 codec and the raw-tensor reader live in engine/k3ref so the Modal
 # harness and the reference implementation cannot drift apart.
@@ -188,6 +197,62 @@ def fetch_layer(layer: int = 12, experts: int = 896) -> dict:
     return out
 
 
+@APP.function(image=BASE_IMAGE, volumes={VOL: WEIGHTS}, timeout=60 * 60 * 4, cpu=4.0)
+def fetch_model_tensors() -> dict:
+    """Fetch embeddings, final normalization, residual mixer, and LM head."""
+    wm = _index()
+    missing = [name for name in MODEL_TENSOR_NAMES if name not in wm]
+    if missing:
+        return {"error": "model tensors missing from checkpoint index", "missing": missing}
+
+    dest = f"{VOL}/model"
+    os.makedirs(dest, exist_ok=True)
+    shard_data = {shard: _header(shard) for shard in {wm[name] for name in MODEL_TENSOR_NAMES}}
+    chunk_size = 64 * 1024 * 1024
+    downloaded = 0
+    started = time.time()
+
+    for name in MODEL_TENSOR_NAMES:
+        out = f"{dest}/{name.replace('.', '__')}.bin"
+        if os.path.exists(out) and os.path.exists(out + ".meta"):
+            continue
+        shard = wm[name]
+        header, data_start = shard_data[shard]
+        meta = header[name]
+        offset_start, offset_end = meta["data_offsets"]
+        partial = out + ".partial"
+        with open(partial, "wb") as handle:
+            position = data_start + offset_start
+            absolute_end = data_start + offset_end
+            while position < absolute_end:
+                end = min(position + chunk_size, absolute_end) - 1
+                raw = _http(f"{BASE_URL}/{shard}", (position, end))
+                handle.write(raw)
+                downloaded += len(raw)
+                position = end + 1
+        os.replace(partial, out)
+        with open(out + ".meta", "w", encoding="utf-8") as handle:
+            json.dump(
+                {"shape": meta["shape"], "dtype": meta["dtype"], "name": name},
+                handle,
+            )
+        print(
+            f"  fetched {name}  {downloaded / 1e9:.2f} GB total",
+            flush=True,
+        )
+
+    WEIGHTS.commit()
+    result = {
+        "directory": dest,
+        "tensors": len(MODEL_TENSOR_NAMES),
+        "bytes": downloaded,
+        "gb": round(downloaded / 1e9, 2),
+        "seconds": round(time.time() - started, 1),
+    }
+    print(json.dumps(result, indent=2))
+    return result
+
+
 @APP.function(image=GPU_IMAGE, gpu="A10G", volumes={VOL: WEIGHTS}, timeout=60 * 30)
 def run_layer(layer: int = 12, experts: int = 8) -> dict:
     """Dequantize on GPU and sanity-check the MXFP4 decode against the real weights.
@@ -330,12 +395,166 @@ def run_reference_layer(layer: int = 12, sequence_length: int = 2, seed: int = 0
     return out
 
 
+def _parse_int_list(value: str | list[int] | tuple[int, ...], name: str) -> list[int]:
+    if isinstance(value, str):
+        pieces = [piece.strip() for piece in value.split(",") if piece.strip()]
+        try:
+            parsed = [int(piece) for piece in pieces]
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a comma-separated integer list") from exc
+    else:
+        parsed = [int(item) for item in value]
+    if not parsed:
+        raise ValueError(f"{name} cannot be empty")
+    return parsed
+
+
+@APP.function(
+    image=GPU_IMAGE,
+    gpu="H100",
+    volumes={VOL: WEIGHTS},
+    timeout=60 * 60 * 2,
+    memory=65536,
+)
+def run_model(
+    layers: str = "1,2,3,4",
+    prompt_tokens: str = "1,2,3",
+    max_new_tokens: int = 1,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+) -> dict:
+    """Load an explicit partial stack and generate real token ids."""
+    import torch
+    from k3ref.config import K3LayerConfig
+    from k3ref.generate import generate
+    from k3ref.model import K3Model
+    from k3ref.state import KDALayerState, MLALayerState
+
+    layer_indices = _parse_int_list(layers, "layers")
+    tokens = _parse_int_list(prompt_tokens, "prompt_tokens")
+    missing_layers = [
+        layer for layer in layer_indices if not os.path.isdir(f"{VOL}/layer{layer}")
+    ]
+    if missing_layers:
+        return {
+            "error": "layer directories are missing; run fetch_layer first",
+            "missing_layers": missing_layers,
+        }
+    model_directory = f"{VOL}/model"
+    if not os.path.isdir(model_directory):
+        return {"error": f"{model_directory} missing; run fetch_model_tensors first"}
+    if not torch.cuda.is_available():
+        return {"error": "run_model requires a CUDA GPU"}
+
+    def activation_stats(tensor: torch.Tensor) -> dict:
+        values = tensor.float()
+        return {
+            "shape": list(tensor.shape),
+            "dtype": str(tensor.dtype),
+            "mean": float(values.mean()),
+            "std": float(values.std()),
+            "rms": float(values.square().mean().sqrt()),
+            "absmax": float(values.abs().max()),
+            "finite": bool(torch.isfinite(values).all()),
+        }
+
+    torch.cuda.reset_peak_memory_stats()
+    config = K3LayerConfig.from_json("/root/reference/config.json")
+    load_started = time.time()
+    model = K3Model.from_directories(
+        VOL,
+        layer_indices,
+        config=config,
+        model_tensor_directory=model_directory,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    load_seconds = time.time() - load_started
+    prompt = torch.tensor([tokens], device="cuda", dtype=torch.long)
+    step_stats: list[dict] = []
+
+    def observe(phase: str, step: int, output) -> None:
+        per_layer = []
+        for layer_index, layer, hidden in zip(
+            model.layer_indices,
+            model.layers,
+            output.layer_hidden_states,
+            strict=True,
+        ):
+            per_layer.append(
+                {
+                    "layer": layer_index,
+                    "attention": "kda" if layer.is_kda else "mla",
+                    "activation": activation_stats(hidden),
+                }
+            )
+        step_stats.append({"phase": phase, "step": step, "layers": per_layer})
+
+    generation_started = time.time()
+    result = generate(
+        model,
+        prompt,
+        max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        observer=observe,
+    )
+    torch.cuda.synchronize()
+    generation_seconds = time.time() - generation_started
+
+    cache = []
+    for layer_index, layer_state in zip(
+        result.state.layer_indices,
+        result.state.layer_states,
+        strict=True,
+    ):
+        if isinstance(layer_state, KDALayerState):
+            cache.append(
+                {
+                    "layer": layer_index,
+                    "type": "kda",
+                    "recurrent_shape": list(layer_state.recurrent.shape),
+                    "q_conv_shape": list(layer_state.q_conv.shape),
+                }
+            )
+        elif isinstance(layer_state, MLALayerState):
+            cache.append(
+                {
+                    "layer": layer_index,
+                    "type": "mla",
+                    "compressed_kv_shape": list(layer_state.compressed_kv.shape),
+                    "rotary_key_shape": list(layer_state.rotary_key.shape),
+                }
+            )
+
+    out = {
+        "device": torch.cuda.get_device_name(0),
+        "layers": layer_indices,
+        "prompt_token_ids": tokens,
+        "generated_token_ids": result.generated_ids[0].tolist(),
+        "all_token_ids": result.token_ids[0].tolist(),
+        "tokens_seen": result.state.tokens_seen,
+        "load_seconds": round(load_seconds, 3),
+        "generation_seconds": round(generation_seconds, 3),
+        "peak_allocated_gb": round(torch.cuda.max_memory_allocated() / 1e9, 3),
+        "steps": step_stats,
+        "cache": cache,
+    }
+    print(json.dumps(out, indent=2))
+    return out
+
+
 @APP.local_entrypoint()
 def main(
     action: str = "probe",
     layer: int = 12,
     experts: int = 8,
     sequence_length: int = 2,
+    layers: str = "1,2,3,4",
+    prompt_tokens: str = "1,2,3",
+    max_new_tokens: int = 1,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
 ):
     if action == "probe":
         probe.remote()
@@ -345,5 +564,18 @@ def main(
         run_layer.remote(layer=layer, experts=experts)
     elif action == "reference":
         run_reference_layer.remote(layer=layer, sequence_length=sequence_length)
+    elif action == "fetch-model":
+        fetch_model_tensors.remote()
+    elif action == "model":
+        run_model.remote(
+            layers=layers,
+            prompt_tokens=prompt_tokens,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
     else:
-        print(f"unknown action {action!r}; use probe | fetch | run | reference")
+        print(
+            f"unknown action {action!r}; use "
+            "probe | fetch | run | reference | fetch-model | model"
+        )
