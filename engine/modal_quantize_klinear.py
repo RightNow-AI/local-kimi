@@ -25,9 +25,12 @@ SOURCE_DIR = f"{SOURCE_MOUNT}/{MODEL_NAME}"
 OUTPUT_DIR = f"{OUTPUT_MOUNT}/{MODEL_NAME}-W4A16"
 MANIFEST_NAME = "quantization-manifest.json"
 
+# numpy is explicit. torch does not pull it, and without it torch degrades
+# quietly at import ("Failed to initialize NumPy") and then dies later on the
+# first conversion, far from the real cause.
 IMAGE = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("torch>=2.5", "safetensors>=0.4.5")
+    .pip_install("torch>=2.5", "safetensors>=0.4.5", "numpy>=2.0")
     .add_local_dir(Path(__file__).parent, remote_path="/root/engine")
 )
 
