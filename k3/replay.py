@@ -35,12 +35,19 @@ _SIG_FIELDS = {"signature", "encrypted_content", "data"}
 _TOOL_ID_FIELDS = {"tool_use_id", "call_id", "tool_call_id"}
 
 _ID_PREFIXES = ("msg_", "chatcmpl-", "chatcmpl_", "resp_", "rs_", "fc_", "call_", "toolu_", "cmpl-")
+_ID_RE = re.compile(
+    r"\b(?:"
+    + "|".join(re.escape(prefix) for prefix in _ID_PREFIXES)
+    + r")[A-Za-z0-9_-]{6,}\b"
+)
 
 
-def _norm_id(value: str) -> str:
+def _norm_id(value: str, ids: dict[str, str]) -> str:
     for prefix in _ID_PREFIXES:
         if value.startswith(prefix):
-            return f"<{prefix.rstrip('_-')}>"
+            if value not in ids:
+                ids[value] = f"<id:{len(ids) + 1}>"
+            return ids[value]
     return value
 
 
@@ -56,29 +63,31 @@ def _norm_signature(value: str) -> str:
 
 
 def normalize(obj: Any) -> Any:
-    """Strip non-determinism while preserving everything that matters."""
-    if isinstance(obj, dict):
-        out: dict[str, Any] = {}
-        for key, value in obj.items():
-            if key in _TIME_FIELDS and isinstance(value, (int, float, str)):
-                out[key] = 0
-            elif key in _SIG_FIELDS and isinstance(value, str) and value:
-                out[key] = _norm_signature(value)
-            elif key in _ID_FIELDS and isinstance(value, str):
-                out[key] = _norm_id(value)
-            elif key in _TOOL_ID_FIELDS and isinstance(value, str):
-                out[key] = _norm_id(value)
-            else:
-                out[key] = normalize(value)
-        return out
-    if isinstance(obj, list):
-        return [normalize(v) for v in obj]
-    if isinstance(obj, str):
-        return _ID_RE.sub(lambda m: _norm_id(m.group(0)), obj)
-    return obj
+    """Strip non-determinism while preserving identity relationships and meaning."""
+    ids: dict[str, str] = {}
 
+    def walk(value: Any) -> Any:
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for key, item in value.items():
+                if key in _TIME_FIELDS and isinstance(item, (int, float, str)):
+                    out[key] = 0
+                elif key in _SIG_FIELDS and isinstance(item, str) and item:
+                    out[key] = _norm_signature(item)
+                elif key in _ID_FIELDS and isinstance(item, str):
+                    out[key] = _norm_id(item, ids)
+                elif key in _TOOL_ID_FIELDS and isinstance(item, str):
+                    out[key] = _norm_id(item, ids)
+                else:
+                    out[key] = walk(item)
+            return out
+        if isinstance(value, list):
+            return [walk(item) for item in value]
+        if isinstance(value, str):
+            return _ID_RE.sub(lambda match: _norm_id(match.group(0), ids), value)
+        return value
 
-_ID_RE = re.compile(r"\b(?:toolu_k3_)?(?:msg|rs|fc|call|resp|chatcmpl|cmpl)[-_][A-Za-z0-9_-]{6,}\b")
+    return walk(obj)
 
 
 def diff_json(expected: Any, actual: Any, path: str = "$", limit: int = 25) -> list[str]:

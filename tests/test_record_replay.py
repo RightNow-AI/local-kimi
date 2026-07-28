@@ -155,6 +155,19 @@ def test_recorder_is_a_no_op_when_disabled() -> None:
     assert recorder.start(path="/v1/messages", headers={}, body={}, preset="openai", detected_via="") is None
 
 
+def test_recorder_keeps_only_the_most_recent_written_paths(tmp_path: Path) -> None:
+    recorder = Recorder(tmp_path)
+    targets = []
+
+    for index in range(105):
+        target = recorder.finish(_cassette(name=f"recording-{index:03d}"))
+        assert target is not None
+        targets.append(target)
+
+    assert len(recorder.written) == 100
+    assert recorder.written == targets[-100:]
+
+
 # --------------------------------------------------------------------------
 # 3. loading a directory
 # --------------------------------------------------------------------------
@@ -365,7 +378,7 @@ async def test_replay_engine_reports_itself_healthy_and_closes_cleanly() -> None
 
 
 # --------------------------------------------------------------------------
-# 7. normalize collapses volatile identity
+# 7. normalize renumbers volatile identity
 # --------------------------------------------------------------------------
 
 
@@ -385,7 +398,7 @@ def _volatile(suffix: str, stamp: int) -> dict[str, Any]:
     }
 
 
-def test_normalize_collapses_ids_and_timestamps() -> None:
+def test_normalize_renumbers_ids_and_collapses_timestamps() -> None:
     a = _volatile("aaaaaaaa1111", 1_700_000_000)
     b = _volatile("bbbbbbbb2222", 1_800_000_000)
     assert a != b
@@ -394,16 +407,97 @@ def test_normalize_collapses_ids_and_timestamps() -> None:
     assert na == nb
     assert diff_json(na, nb) == []
 
-    assert na["id"] == "<msg>"
-    assert na["message_id"] == "<chatcmpl>"
-    assert na["item_id"] == "<resp>"
-    assert na["response_id"] == "<rs>"
-    assert na["tool_use_id"] == "<toolu>"
-    assert na["call_id"] == "<call>"
-    assert na["tool_call_id"] == "<fc>"
+    assert na["id"] == "<id:1>"
+    assert na["message_id"] == "<id:2>"
+    assert na["item_id"] == "<id:3>"
+    assert na["response_id"] == "<id:4>"
+    assert na["tool_use_id"] == "<id:5>"
+    assert na["call_id"] == "<id:6>"
+    assert na["tool_call_id"] == "<id:7>"
+    assert na["nested"][0]["id"] == "<id:8>"
     assert na["created"] == 0
     assert na["created_at"] == 0
     assert na["content"] == "the part that actually matters"
+
+
+def test_normalize_exposes_a_broken_tool_id_relationship() -> None:
+    matching = {
+        "content": [
+            {"type": "tool_use", "id": "toolu_aaaaaaaa1111"},
+            {"type": "tool_result", "tool_use_id": "toolu_aaaaaaaa1111"},
+        ]
+    }
+    broken = {
+        "content": [
+            {"type": "tool_use", "id": "toolu_aaaaaaaa1111"},
+            {"type": "tool_result", "tool_use_id": "toolu_bbbbbbbb2222"},
+        ]
+    }
+
+    expected = normalize(matching)
+    actual = normalize(broken)
+
+    assert expected != actual
+    assert diff_json(expected, actual) == [
+        "$.content[1].tool_use_id: '<id:1>' != '<id:2>'"
+    ]
+
+
+def test_normalize_erases_random_id_values_but_keeps_relationships() -> None:
+    first = {
+        "content": [
+            {"type": "tool_use", "id": "toolu_aaaaaaaa1111"},
+            {"type": "tool_result", "tool_use_id": "toolu_aaaaaaaa1111"},
+        ]
+    }
+    second = {
+        "content": [
+            {"type": "tool_use", "id": "toolu_bbbbbbbb2222"},
+            {"type": "tool_result", "tool_use_id": "toolu_bbbbbbbb2222"},
+        ]
+    }
+
+    normalized_first = normalize(first)
+    normalized_second = normalize(second)
+
+    assert normalized_first == normalized_second
+    assert normalized_first["content"][0]["id"] == "<id:1>"
+    assert normalized_first["content"][1]["tool_use_id"] == "<id:1>"
+
+
+def test_normalize_shares_id_mapping_between_fields_and_free_text() -> None:
+    normalized = normalize(
+        {
+            "tool_call_id": "call_abcdef123",
+            "content": "completed call_abcdef123 successfully",
+        }
+    )
+
+    assert normalized["tool_call_id"] == "<id:1>"
+    assert normalized["content"] == "completed <id:1> successfully"
+
+
+def test_normalize_id_numbering_is_deterministic_and_call_local() -> None:
+    payload = {
+        "items": [
+            {"id": "msg_aaaaaa1111"},
+            {"call_id": "call_bbbbbb2222"},
+            {"tool_use_id": "msg_aaaaaa1111"},
+        ]
+    }
+    expected = {
+        "items": [
+            {"id": "<id:1>"},
+            {"call_id": "<id:2>"},
+            {"tool_use_id": "<id:1>"},
+        ]
+    }
+
+    assert normalize(payload) == expected
+    assert normalize(payload) == expected
+    assert normalize({"response_id": "resp_cccccc3333"}) == {
+        "response_id": "<id:1>"
+    }
 
 
 def test_normalize_leaves_real_content_alone() -> None:
