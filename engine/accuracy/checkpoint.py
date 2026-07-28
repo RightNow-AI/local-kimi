@@ -294,8 +294,17 @@ def _validate_existing_checkpoint(
     return manifest
 
 
-def build_dequantized_checkpoint(source_dir: Path, output_root: Path) -> dict[str, Any]:
-    """Quantize and immediately dequantize every selected tensor shard by shard."""
+def build_dequantized_checkpoint(
+    source_dir: Path,
+    output_root: Path,
+    profile: str = "default",
+) -> dict[str, Any]:
+    """Quantize and immediately dequantize every selected tensor shard by shard.
+
+    ``profile`` selects a named policy from the canonical plan. It reaches the
+    output directory name through the plan digest, so two profiles produce two
+    distinct checkpoints and cannot be confused for one another.
+    """
     import torch
     from safetensors import safe_open
     from safetensors.torch import save_file
@@ -353,6 +362,7 @@ def build_dequantized_checkpoint(source_dir: Path, output_root: Path) -> dict[st
         source_dir=source_dir,
         config=config,
         index=index,
+        profile=profile,
     )
     decisions = {item.name: item for item in plan.decisions}
     output_dir = output_root / (
@@ -596,9 +606,16 @@ def main() -> None:
     parser.add_argument("--source-dir", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--result-json", required=True, type=Path)
+    parser.add_argument(
+        "--profile",
+        default="default",
+        help="named canonical quantization profile to measure",
+    )
     args = parser.parse_args()
 
-    result = build_dequantized_checkpoint(args.source_dir, args.output_root)
+    result = build_dequantized_checkpoint(
+        args.source_dir, args.output_root, profile=args.profile
+    )
     args.result_json.parent.mkdir(parents=True, exist_ok=True)
     with args.result_json.open("w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2, sort_keys=True)

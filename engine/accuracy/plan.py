@@ -254,6 +254,7 @@ def _canonical_context(
     source_dir: Path,
     config: Mapping[str, Any],
     index: Mapping[str, Any],
+    profile: str = "default",
 ) -> dict[str, Any]:
     """Build the argument context the canonical plan factory is called with.
 
@@ -282,6 +283,10 @@ def _canonical_context(
         "tensor_specs": specs_by_name,
         "tensor_names": tuple(specs_by_name),
         "weight_names": tuple(specs_by_name),
+        # Named quantization profile. The canonical factory defaults this, so
+        # passing it here is what lets an experiment measure a profile other
+        # than the shipped one without editing either module.
+        "profile": profile,
     }
     metadata_type = getattr(module, "TensorMetadata", None)
     if callable(metadata_type):
@@ -307,9 +312,17 @@ def _canonical_decisions(
     source_dir: Path,
     config: Mapping[str, Any],
     index: Mapping[str, Any],
+    profile: str = "default",
 ) -> tuple[TensorDecision, ...]:
     specs_by_name = {spec.name: spec for spec in specs}
-    context = _canonical_context(module, specs, source_dir=source_dir, config=config, index=index)
+    context = _canonical_context(
+        module,
+        specs,
+        source_dir=source_dir,
+        config=config,
+        index=index,
+        profile=profile,
+    )
 
     for factory_name in (
         "build_klinear_quantization_plan",
@@ -425,6 +438,7 @@ def resolve_plan(
     source_dir: Path,
     config: Mapping[str, Any],
     index: Mapping[str, Any],
+    profile: str = "default",
 ) -> PlanResolution:
     """Use the canonical plan when present, otherwise emit a blocked fallback."""
     local = tuple(_local_decision(spec) for spec in specs)
@@ -450,6 +464,7 @@ def resolve_plan(
         source_dir=source_dir,
         config=config,
         index=index,
+        profile=profile,
     )
     _validate_codec_eligibility(canonical)
     local_selected = {item.name for item in local if item.quantize}

@@ -178,7 +178,7 @@ def _run_matched_sides(
     memory=262144,
     timeout=60 * 60 * 12,
 )
-def measure() -> dict:
+def measure(profile: str = "default") -> dict:
     from engine.accuracy.analyze import build_evidence, verify_evidence_record
     from engine.accuracy.router_compat import validate_vllm_router_capture_config
 
@@ -199,6 +199,8 @@ def measure() -> dict:
             f"{ACCURACY_MOUNT}/checkpoints",
             "--result-json",
             str(checkpoint_result),
+            "--profile",
+            profile,
         ]
     )
     ACCURACY_VOLUME.commit()
@@ -260,5 +262,5 @@ def measure() -> dict:
 
 
 @app.local_entrypoint()
-def main():
-    print(json.dumps(measure.remote(), indent=2, sort_keys=True))
+def main(profile: str = "default"):
+    print(json.dumps(measure.remote(profile=profile), indent=2, sort_keys=True))

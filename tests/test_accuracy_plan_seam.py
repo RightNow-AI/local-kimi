@@ -53,6 +53,15 @@ def _specs() -> tuple[TensorSpec, ...]:
             shape=(2304,),
             dtype="BF16",
         ),
+        # The shared expert runs on EVERY token, unlike a routed expert which
+        # sees roughly 8 of 256, so it is the class the shared-experts-bf16
+        # profile exists to retain.
+        TensorSpec(
+            name="model.layers.1.block_sparse_moe.shared_experts.down_proj.weight",
+            shard="model-00002-of-00020.safetensors",
+            shape=(2304, 1024),
+            dtype="BF16",
+        ),
     )
 
 
@@ -146,3 +155,47 @@ def test_canonical_module_exposes_the_translation_target():
     """The resolver translates defensively; this pins what it depends on."""
     assert hasattr(klinear_plan, "TensorMetadata")
     assert callable(klinear_plan.TensorMetadata)
+
+
+def test_the_named_profile_reaches_the_canonical_plan():
+    """A profile that does not arrive would silently measure the wrong artifact.
+
+    The canonical factory defaults ``profile``, so a context that omits it
+    produces a valid plan for the WRONG policy rather than an error. The whole
+    shared-expert experiment depends on this argument arriving, and its absence
+    would look like a null result instead of a plumbing bug.
+    """
+    specs = _specs()
+    context = _canonical_context(
+        klinear_plan,
+        specs,
+        source_dir=Path("/weights/Kimi-Linear-48B-A3B-Instruct"),
+        config={"num_hidden_layers": 27},
+        index={"weight_map": {spec.name: spec.shard for spec in specs}},
+        profile="shared-experts-bf16",
+    )
+    assert context["profile"] == "shared-experts-bf16"
+
+    plan = _invoke_with_context(build_klinear_quantization_plan, context)
+    decisions = {decision.name: decision for decision in plan.tensors}
+
+    # The one decision the profile is supposed to change, and one it is not.
+    shared = decisions["model.layers.1.block_sparse_moe.shared_experts.down_proj.weight"]
+    assert shared.quantize is False, "shared-experts-bf16 must retain shared experts"
+    routed = decisions["model.layers.1.block_sparse_moe.experts.0.w1.weight"]
+    assert routed.quantize is True, "routed experts stay quantized under this profile"
+
+
+def test_an_unknown_profile_is_refused_rather_than_defaulted():
+    """Falling back on a typo would measure the shipped artifact silently."""
+    specs = _specs()
+    context = _canonical_context(
+        klinear_plan,
+        specs,
+        source_dir=Path("/weights/Kimi-Linear-48B-A3B-Instruct"),
+        config={"num_hidden_layers": 27},
+        index={"weight_map": {spec.name: spec.shard for spec in specs}},
+        profile="shared-experts-bf-16",
+    )
+    with pytest.raises(ValueError, match="unknown"):
+        _invoke_with_context(build_klinear_quantization_plan, context)
