@@ -45,6 +45,27 @@ the work that makes the difference between a research build and a sellable one:
 - or, on Blackwell, feed the packed MXFP4 weights to the tensor cores directly,
   since K3 ships in the OCP microscaling format the hardware consumes natively.
 
+### There is no scatter penalty for MoE expert access
+
+Copying expert-sized blocks out of a DRAM-resident bank, same primitive and same
+volume, only the order differing:
+
+| | GB/s |
+|---|---:|
+| Sequential expert order | 25.8 |
+| Random expert order | 26.2 |
+| **Ratio** | **1.013** |
+
+At 17.5 MB per expert the blocks are far larger than any DRAM page or prefetch
+window, so routing to 16 arbitrary experts costs exactly what reading 16
+adjacent ones costs. MoE designs often assume a gather penalty here; at K3's
+expert granularity there is none.
+
+This matters for the v1 roofline: the expert bank can be modelled at the full
+sequential DRAM figure of the target bus with no scatter discount. The absolute
+25-26 GB/s above is single-threaded on Modal's host and does not transfer; the
+ratio is what does.
+
 ### Batching is nearly free on the compute side
 
 Batch 1 and batch 32 cost the same wall time on an H100 - 23.3 us versus 22.6 us

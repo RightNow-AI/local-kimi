@@ -136,6 +136,59 @@ def bench(gpu_kind: str = "A10G", batch: int = 1) -> dict:
     return out
 
 
+@app.function(image=IMAGE, cpu=16.0, memory=32768, timeout=60 * 30)
+def bench_cpu_gather(experts: int = 512) -> dict:
+    """How much DRAM bandwidth does the expert ACCESS PATTERN actually get?
+
+    The v1 design keeps the expert bank in CPU DRAM, so its roofline depends on
+    the bandwidth achieved when gathering 16 scattered 17.5 MB blocks per token,
+    not on the sequential memcpy figure a spec sheet quotes. That ratio is the
+    part worth measuring; the absolute number here reflects Modal's host, not a
+    12-channel workstation, so use the FRACTION and apply it to the target bus.
+    """
+    import numpy as np
+
+    bank_bytes = experts * EXPERT_BYTES
+    bank = np.empty(bank_bytes, dtype=np.uint8)
+    bank[::4096] = 1  # touch pages so the allocation is real
+    sink = np.empty(EXPERT_BYTES, dtype=np.uint8)
+    rng = np.random.default_rng(0)
+
+    def move(order) -> float:
+        """Copy out expert-sized blocks in the given order; return GB/s."""
+        t0 = time.perf_counter()
+        moved = 0
+        for e in order:
+            off = int(e) * EXPERT_BYTES
+            np.copyto(sink, bank[off : off + EXPERT_BYTES])
+            moved += EXPERT_BYTES
+        return moved / (time.perf_counter() - t0) / 1e9
+
+    # Same primitive, same volume, only the ORDER differs. That isolates the
+    # cost of the access pattern from the cost of the copy itself, which is the
+    # only part that transfers to a different machine.
+    count = min(experts, 512)
+    seq_gbps = move(range(count))
+    seq_gbps = max(seq_gbps, move(range(count)))  # second pass: caches warm
+    gather_gbps = move(rng.integers(0, experts, size=count))
+    total = 0
+
+    out = {
+        "bank_gb": round(bank_bytes / 1e9, 2),
+        "experts_in_bank": experts,
+        "sequential_scan_GBps": round(seq_gbps, 1),
+        "expert_gather_GBps": round(gather_gbps, 1),
+        "gather_fraction_of_sequential": round(gather_gbps / max(seq_gbps, 1e-9), 3),
+        "ms_per_token_of_expert_gather": round(
+            EXPERTS_PER_TOKEN * EXPERT_BYTES * MOE_LAYERS / (gather_gbps * 1e9) * 1e3, 1
+        ),
+        "note": "absolute GB/s is Modal's host; apply the FRACTION to a target bus",
+        "checksum": total % 1000,
+    }
+    print(json.dumps(out, indent=2))
+    return out
+
+
 @app.function(image=IMAGE, gpu="H100", timeout=60 * 30)
 def bench_h100(batch: int = 32) -> dict:
     """Same measurements on target-class hardware.
