@@ -17,10 +17,11 @@ makes the parsers far harder to get right.
 from __future__ import annotations
 
 import ast
+import html
 import json
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional, Union
 
 
@@ -238,6 +239,258 @@ class KimiToolParser(ToolCallParser):
         suffix = f"{self._pending_index}" if idx is None else idx
         self._pending_index += 1
         return name, f"call_{name}_{suffix}_{uuid.uuid4().hex[:8]}"
+
+
+@dataclass(slots=True)
+class _K3PendingCall:
+    name: str
+    index: str
+    raw: list[str] = field(default_factory=list)
+    arguments: dict[str, object] = field(default_factory=dict)
+    json_block: Optional[str] = None
+    element: Optional[str] = None
+    element_attrs: dict[str, str] = field(default_factory=dict)
+    element_body: list[str] = field(default_factory=list)
+    malformed: bool = False
+
+
+class KimiK3ToolParser(ToolCallParser):
+    """Kimi K3's nested XTML tool-call format.
+
+    K3 emits typed ``argument`` elements by default. A ``json`` element is the
+    explicit raw-block path and its body must survive byte for byte.
+    """
+
+    name = "kimi_k3"
+
+    OPEN = "<|open|>"
+    CLOSE = "<|close|>"
+    SEP = "<|sep|>"
+    END_OF_MSG = "<|end_of_msg|>"
+    TOKENS = (OPEN, CLOSE, SEP, END_OF_MSG)
+    _ATTR_RE = re.compile(r'([^\s=]+)="([^"]*)"')
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._buf = ""
+        self._tools_depth = 0
+        self._tools_text = ""
+        self._call: Optional[_K3PendingCall] = None
+
+    def feed(self, text: str) -> list[ParseEvent]:
+        if not text:
+            return []
+        self._buf += text
+        return self._drain(final=False)
+
+    def finish(self) -> list[ParseEvent]:
+        events = self._drain(final=True)
+        if self._call is not None:
+            fallback = _without_k3_controls("".join(self._call.raw), self.TOKENS)
+            if fallback:
+                events.append(ParsedText(fallback))
+            self._call = None
+        self._flush_tools_text(events)
+        self._buf = ""
+        self._tools_depth = 0
+        return [e for e in events if not (isinstance(e, ParsedText) and not e.text)]
+
+    def _drain(self, final: bool) -> list[ParseEvent]:
+        out: list[ParseEvent] = []
+        while True:
+            idx, token = _first_control(self._buf, self.TOKENS)
+            if idx == -1:
+                keep = 0 if final else _hold_back(self._buf, self.TOKENS)
+                emit = self._buf[: len(self._buf) - keep]
+                self._buf = self._buf[len(self._buf) - keep :]
+                self._handle_text(emit, out)
+                return out
+
+            self._handle_text(self._buf[:idx], out)
+            self._buf = self._buf[idx:]
+
+            if token in (self.SEP, self.END_OF_MSG):
+                self._handle_marker(token)
+                self._buf = self._buf[len(token) :]
+                continue
+
+            end = self._buf.find(self.SEP, len(token))
+            if end == -1:
+                if not final:
+                    return out
+                raw = self._buf
+                self._buf = ""
+                if self._call is not None:
+                    self._call.raw.append(raw)
+                    self._call.malformed = True
+                else:
+                    self._handle_text(_without_k3_controls(raw, self.TOKENS), out)
+                return out
+
+            header = self._buf[len(token) : end]
+            raw = self._buf[: end + len(self.SEP)]
+            self._buf = self._buf[end + len(self.SEP) :]
+            name, attrs = self._parse_tag(header)
+            if token == self.OPEN:
+                self._handle_open(name, attrs, raw, out)
+            else:
+                self._handle_close(name, raw, out)
+
+    def _handle_text(self, text: str, out: list[ParseEvent]) -> None:
+        if not text:
+            return
+        if self._call is not None:
+            self._call.raw.append(text)
+            if self._call.element is not None:
+                self._call.element_body.append(text)
+            elif text.strip():
+                self._call.malformed = True
+            return
+        if self._tools_depth:
+            self._tools_text += text
+            return
+        out.append(ParsedText(text))
+
+    def _handle_marker(self, token: str) -> None:
+        if self._call is not None:
+            self._call.raw.append(token)
+            self._call.malformed = True
+
+    def _handle_open(
+        self,
+        name: str,
+        attrs: dict[str, str],
+        raw: str,
+        out: list[ParseEvent],
+    ) -> None:
+        if self._call is not None:
+            self._call.raw.append(raw)
+            if name in ("argument", "json") and self._call.element is None:
+                self._call.element = name
+                self._call.element_attrs = attrs
+                self._call.element_body = []
+            else:
+                self._call.malformed = True
+            return
+
+        if name == "tools":
+            self._flush_tools_text(out)
+            self._tools_depth += 1
+            return
+        if name == "call":
+            self._flush_tools_text(out)
+            self._call = _K3PendingCall(
+                name=attrs.get("tool", ""),
+                index=attrs.get("index", ""),
+                raw=[raw],
+            )
+
+    def _handle_close(self, name: str, raw: str, out: list[ParseEvent]) -> None:
+        if self._call is not None:
+            self._call.raw.append(raw)
+            if name in ("argument", "json"):
+                if name != self._call.element:
+                    self._call.malformed = True
+                else:
+                    self._finish_element()
+                return
+            if name == "call":
+                if self._call.element is not None:
+                    self._call.malformed = True
+                self._finish_call(out)
+                return
+            self._call.malformed = True
+            return
+
+        if name == "tools":
+            self._flush_tools_text(out)
+            if self._tools_depth:
+                self._tools_depth -= 1
+
+    def _finish_element(self) -> None:
+        assert self._call is not None
+        body = "".join(self._call.element_body)
+        if self._call.element == "json":
+            self._call.json_block = body
+        else:
+            key = self._call.element_attrs.get("key")
+            kind = self._call.element_attrs.get("type")
+            if key is None or kind is None:
+                self._call.malformed = True
+            else:
+                try:
+                    self._call.arguments[key] = _decode_xtml_argument(kind, body)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    self._call.malformed = True
+        self._call.element = None
+        self._call.element_attrs = {}
+        self._call.element_body = []
+
+    def _finish_call(self, out: list[ParseEvent]) -> None:
+        assert self._call is not None
+        call = self._call
+        self._call = None
+        if call.malformed or not call.name:
+            fallback = _without_k3_controls("".join(call.raw), self.TOKENS)
+            if fallback:
+                out.append(ParsedText(fallback))
+            return
+        arguments = (
+            call.json_block
+            if call.json_block is not None
+            else json.dumps(call.arguments, ensure_ascii=False)
+        )
+        out.append(ParsedToolCall(name=call.name, arguments=arguments, id=new_call_id()))
+
+    def _flush_tools_text(self, out: list[ParseEvent]) -> None:
+        if self._tools_text.strip():
+            out.append(ParsedText(self._tools_text))
+        self._tools_text = ""
+
+    @classmethod
+    def _parse_tag(cls, header: str) -> tuple[str, dict[str, str]]:
+        name = header.split(None, 1)[0] if header.strip() else ""
+        attrs = {
+            match.group(1): html.unescape(match.group(2))
+            for match in cls._ATTR_RE.finditer(header[len(name) :])
+        }
+        return name, attrs
+
+
+def _first_control(buf: str, tokens: Iterable[str]) -> tuple[int, str]:
+    best_idx = -1
+    best_token = ""
+    for token in tokens:
+        idx = buf.find(token)
+        if idx != -1 and (best_idx == -1 or idx < best_idx):
+            best_idx = idx
+            best_token = token
+    return best_idx, best_token
+
+
+def _without_k3_controls(text: str, tokens: Iterable[str]) -> str:
+    for token in tokens:
+        text = text.replace(token, "")
+    return text
+
+
+def _decode_xtml_argument(kind: str, body: str) -> object:
+    if kind == "string":
+        return body
+    value = json.loads(body.strip())
+    if kind == "boolean" and isinstance(value, bool):
+        return value
+    if kind == "null" and value is None:
+        return value
+    if kind == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    if kind == "object" and isinstance(value, dict):
+        return value
+    if kind == "array" and isinstance(value, list):
+        return value
+    raise TypeError(f"XTML argument body does not match declared type {kind!r}")
 
 
 def _first_of(*candidates: tuple[int, str, str]) -> tuple[int, str, str]:
@@ -484,6 +737,7 @@ _REGISTRY: dict[str, Callable[[], ToolCallParser]] = {
     "none": ToolCallParser,
     "kimi": KimiToolParser,
     "kimi_k2": KimiToolParser,
+    "kimi_k3": KimiK3ToolParser,
     "hermes": HermesToolParser,
     "json": JsonToolParser,
     "pythonic": PythonicToolParser,
@@ -516,6 +770,7 @@ __all__ = [
     "ParseEvent",
     "ToolCallParser",
     "KimiToolParser",
+    "KimiK3ToolParser",
     "HermesToolParser",
     "JsonToolParser",
     "PythonicToolParser",

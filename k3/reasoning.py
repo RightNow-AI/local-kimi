@@ -408,6 +408,128 @@ def restore_assistant(msg: Message, ledger: ReasoningLedger) -> Restored:
     return Restored()
 
 
+def normalize_kimi_k3_assistant(message: dict[str, Any]) -> dict[str, Any]:
+    """Prepare one OpenAI-shaped assistant message for K3 XTML emission.
+
+    Valid JSON argument strings become objects so the encoder emits canonical
+    typed ``argument`` elements. Only an unparseable raw string selects K3's
+    explicit ``json`` block path.
+    """
+    normalized = dict(message)
+    tool_calls = normalized.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return normalized
+
+    normalized_calls: list[Any] = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            normalized_calls.append(tool_call)
+            continue
+        call = dict(tool_call)
+        nested = isinstance(call.get("function"), dict)
+        function = dict(call["function"] if nested else call)
+        arguments = function.get("arguments")
+        json_block: Optional[str] = None
+        if arguments is None:
+            arguments = {}
+        elif isinstance(arguments, str):
+            if arguments.strip():
+                try:
+                    parsed = json.loads(arguments)
+                except json.JSONDecodeError:
+                    json_block = arguments
+                    parsed = {}
+                if not isinstance(parsed, dict):
+                    raise ValueError("Kimi K3 tool call arguments must be a JSON object.")
+                arguments = parsed
+            else:
+                arguments = {}
+        elif not isinstance(arguments, dict):
+            raise TypeError("Kimi K3 tool call arguments must be a dict or JSON object string.")
+
+        function["arguments"] = arguments
+        if json_block is None:
+            function.pop("_xtml_json_block", None)
+        else:
+            function["_xtml_json_block"] = json_block
+        if nested:
+            call["function"] = function
+        else:
+            call = function
+        normalized_calls.append(call)
+    normalized["tool_calls"] = normalized_calls
+    return normalized
+
+
+def normalize_kimi_k3_tool_result_messages(
+    messages: list[Any],
+) -> list[Any]:
+    """Resolve opaque tool ids to K3's function-name and 1-based position."""
+    output: list[Any] = []
+    current_index: dict[str, tuple[int, Any]] = {}
+    i = 0
+    while i < len(messages):
+        message = messages[i]
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            current_index = _kimi_k3_call_index(message.get("tool_calls"))
+            output.append(message)
+            i += 1
+            continue
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            output.append(message)
+            i += 1
+            continue
+
+        run: list[tuple[Optional[int], int, dict[str, Any], Any]] = []
+        unresolved = False
+        offset = 0
+        while (
+            i < len(messages)
+            and isinstance(messages[i], dict)
+            and messages[i].get("role") == "tool"
+        ):
+            tool_message = messages[i]
+            call_id = tool_message.get("tool_call_id", tool_message.get("id"))
+            matched = current_index.get(str(call_id)) if call_id is not None else None
+            if matched is None:
+                unresolved = True
+                run.append((None, offset, tool_message, None))
+            else:
+                position, name = matched
+                run.append((position, offset, tool_message, name))
+            i += 1
+            offset += 1
+
+        if unresolved:
+            output.extend(item[2] for item in run)
+            continue
+        run.sort(key=lambda item: (item[0], item[1]))
+        for _, _, tool_message, name in run:
+            resolved = dict(tool_message)
+            if name is not None:
+                resolved["tool"] = name
+                if "name" in resolved:
+                    resolved["name"] = name
+            output.append(resolved)
+    return output
+
+
+def _kimi_k3_call_index(tool_calls: Any) -> dict[str, tuple[int, Any]]:
+    index: dict[str, tuple[int, Any]] = {}
+    if not isinstance(tool_calls, list):
+        return index
+    for position, tool_call in enumerate(tool_calls, start=1):
+        if not isinstance(tool_call, dict) or tool_call.get("id") is None:
+            continue
+        key = str(tool_call["id"])
+        if key in index:
+            continue
+        function = tool_call.get("function")
+        name = function.get("name") if isinstance(function, dict) else tool_call.get("name")
+        index[key] = (position, name)
+    return index
+
+
 def build_upstream_assistant(
     msg: Message,
     restored: Restored,
@@ -505,6 +627,8 @@ __all__ = [
     "fingerprint_parts",
     "fingerprint_message",
     "restore_assistant",
+    "normalize_kimi_k3_assistant",
+    "normalize_kimi_k3_tool_result_messages",
     "build_upstream_assistant",
     "upstream_assistant_from_response",
     "strip_inline_think",

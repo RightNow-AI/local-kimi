@@ -15,6 +15,10 @@ built from the client's documented wire format but has not been pinned by a
 recording yet — it is expected to work, and it is expected to be the thing that
 breaks when the client ships an update. Promote a preset by recording real
 traffic (``k3 serve --record DIR``) and dropping the cassette in.
+
+``kimi`` and ``kimi_k2`` intentionally select the legacy K2 control-token
+parser. ``kimi_k3`` selects K3 XTML; defaults stay on K2 until their recorded
+fixtures are regenerated at the release gate.
 """
 
 from __future__ import annotations
@@ -28,6 +32,12 @@ from .template import TemplateConfig
 
 Dialect = Literal["anthropic_messages", "openai_chat", "openai_responses"]
 Status = Literal["stable", "provisional"]
+
+TOOL_PARSER_DESCRIPTIONS = {
+    "kimi": "Kimi K2 control-token format (compatibility alias)",
+    "kimi_k2": "Kimi K2 control-token format",
+    "kimi_k3": "Kimi K3 XTML format",
+}
 
 
 @dataclass(slots=True)
@@ -426,6 +436,7 @@ __all__ = [
     "DetectRules",
     "Setup",
     "Dialect",
+    "TOOL_PARSER_DESCRIPTIONS",
     "ALL_PRESETS",
     "FALLBACK_BY_PATH",
     "get",

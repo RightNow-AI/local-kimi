@@ -20,7 +20,12 @@ import httpx
 from .ir import CanonicalRequest, ImagePart, Message, TextPart, ToolResultPart
 from .presets import Preset
 from .reasoning import ReasoningLedger, build_upstream_assistant, restore_assistant
-from .template import build_system_prompt, collapse_messages, native_tools_payload
+from .template import (
+    build_system_prompt,
+    collapse_messages,
+    native_tools_payload,
+    render_kimi_k3_tool_call,
+)
 
 
 class UpstreamError(RuntimeError):
@@ -261,14 +266,20 @@ async def _iter_sse_json(resp: httpx.Response) -> AsyncIterator[dict[str, Any]]:
 class MockUpstream:
     """A scripted stand-in for K3 so the whole path runs without a GPU.
 
-    It deliberately emits tool calls in the Kimi control-token format rather
-    than native ``tool_calls`` deltas, so ``k3 serve --mock`` exercises the text
+    It deliberately emits tool calls in the selected K2 or K3 text format
+    rather than native ``tool_calls`` deltas, so mock traffic exercises the text
     parser too — the part most likely to be wrong.
     """
 
-    def __init__(self, cfg: Optional[UpstreamConfig] = None, delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        cfg: Optional[UpstreamConfig] = None,
+        delay: float = 0.0,
+        tool_parser: str = "kimi",
+    ) -> None:
         self.cfg = cfg or UpstreamConfig()
         self.delay = delay
+        self.tool_parser = tool_parser
         self.calls: list[dict[str, Any]] = []
 
     async def aclose(self) -> None:  # pragma: no cover - nothing to close
@@ -276,7 +287,7 @@ class MockUpstream:
 
     async def chat(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(payload)
-        reasoning, content = _mock_generate(payload)
+        reasoning, content = _mock_generate(payload, self.tool_parser)
         return {
             "id": "chatcmpl-mock",
             "object": "chat.completion",
@@ -302,7 +313,7 @@ class MockUpstream:
 
     async def chat_stream(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         self.calls.append(payload)
-        reasoning, content = _mock_generate(payload)
+        reasoning, content = _mock_generate(payload, self.tool_parser)
         model = payload.get("model", "k3")
 
         def chunk(delta: dict[str, Any], finish: Optional[str] = None) -> dict[str, Any]:
@@ -359,7 +370,7 @@ def _rough_prompt_tokens(payload: dict[str, Any]) -> int:
     return max(1, total // 4)
 
 
-_MOCK_TOOL_CALL = (
+_MOCK_K2_TOOL_CALL = (
     "<|tool_calls_section_begin|>"
     "<|tool_call_begin|>functions.{name}:0"
     '<|tool_call_argument_begin|>{args}'
@@ -368,7 +379,9 @@ _MOCK_TOOL_CALL = (
 )
 
 
-def _mock_generate(payload: dict[str, Any]) -> tuple[str, str]:
+def _mock_generate(
+    payload: dict[str, Any], tool_parser: str = "kimi"
+) -> tuple[str, str]:
     messages = payload.get("messages") or []
     tools = payload.get("tools") or []
     last_user = ""
@@ -388,7 +401,12 @@ def _mock_generate(payload: dict[str, Any]) -> tuple[str, str]:
             f"I have {len(tools)} tool(s) available; {name} is the right one here, "
             "so I will call it before answering."
         )
-        return reasoning, _MOCK_TOOL_CALL.format(name=name, args=args)
+        if tool_parser == "kimi_k3":
+            return reasoning, _mock_k3_tool_call(name, args)
+        return reasoning, _MOCK_K2_TOOL_CALL.format(
+            name=name,
+            args=json.dumps(args, ensure_ascii=False),
+        )
 
     reasoning = (
         f"Reviewing the conversation. The user's request was {last_user.strip()[:160]!r}. "
@@ -402,7 +420,7 @@ def _mock_generate(payload: dict[str, Any]) -> tuple[str, str]:
     return reasoning, content
 
 
-def _mock_args(schema: dict[str, Any], hint: str) -> str:
+def _mock_args(schema: dict[str, Any], hint: str) -> dict[str, Any]:
     props = (schema or {}).get("properties") or {}
     required = (schema or {}).get("required") or list(props)[:1]
     out: dict[str, Any] = {}
@@ -421,7 +439,17 @@ def _mock_args(schema: dict[str, Any], hint: str) -> str:
             out[key] = {}
         else:
             out[key] = re.sub(r"\s+", " ", hint).strip()[:80] or "k3"
-    return json.dumps(out, ensure_ascii=False)
+    return out
+
+
+def _mock_k3_tool_call(name: str, arguments: dict[str, Any]) -> str:
+    return "".join(
+        [
+            "<|open|>tools<|sep|>",
+            render_kimi_k3_tool_call(name, arguments),
+            "<|close|>tools<|sep|>",
+        ]
+    )
 
 
 __all__ = [

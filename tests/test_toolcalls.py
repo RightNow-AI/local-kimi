@@ -20,6 +20,7 @@ import pytest
 from k3.toolcalls import (
     HermesToolParser,
     JsonToolParser,
+    KimiK3ToolParser,
     KimiToolParser,
     ParsedText,
     ParsedToolCall,
@@ -616,6 +617,7 @@ def test_passthrough_ignores_empty_feed_and_finish():
         ("none", ToolCallParser),
         ("kimi", KimiToolParser),
         ("kimi_k2", KimiToolParser),
+        ("kimi_k3", KimiK3ToolParser),
         ("hermes", HermesToolParser),
         ("json", JsonToolParser),
         ("pythonic", PythonicToolParser),
@@ -644,6 +646,7 @@ def test_parser_names_matches_registry():
         "none",
         "kimi",
         "kimi_k2",
+        "kimi_k3",
         "hermes",
         "json",
         "pythonic",
