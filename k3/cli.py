@@ -110,6 +110,11 @@ def serve(
         "reasoning_content",
         help="Field the engine carries reasoning in: reasoning_content | inline | none.",
     ),
+    tool_parser: Optional[str] = typer.Option(
+        None,
+        "--tool-parser",
+        help="Override the preset parser: " + " | ".join(parser_names()) + ".",
+    ),
     mock: bool = typer.Option(False, "--mock", help="Run without an engine, for demos and tests."),
     cors_origin: list[str] = typer.Option(
         [],
@@ -139,6 +144,13 @@ def serve(
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(2)
 
+    if tool_parser is not None and tool_parser not in parser_names():
+        console.print(
+            f"[red]unknown tool-call parser {tool_parser!r}; "
+            f"known: {', '.join(parser_names())}[/red]"
+        )
+        raise typer.Exit(2)
+
     problems = presets_mod.validate()
     if problems:
         for problem in problems:
@@ -149,6 +161,7 @@ def serve(
         host=host,
         port=port,
         forced_client=client,
+        tool_parser=tool_parser,
         auth_token=api_key,
         record_dir=str(record) if record else None,
         record_compress=record_compress,

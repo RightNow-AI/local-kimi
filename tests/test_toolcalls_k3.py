@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import json
 
-from k3.toolcalls import KimiK3ToolParser, ParsedText, ParsedToolCall, parse_all
+from k3.toolcalls import (
+    KimiK3ToolParser,
+    ParsedReasoning,
+    ParsedText,
+    ParsedToolCall,
+    parse_all,
+)
 
 
 OPEN = KimiK3ToolParser.OPEN
@@ -62,6 +68,10 @@ def tool_events(events: list[object]) -> list[ParsedToolCall]:
     return [event for event in events if isinstance(event, ParsedToolCall)]
 
 
+def reasoning_events(events: list[object]) -> list[ParsedReasoning]:
+    return [event for event in events if isinstance(event, ParsedReasoning)]
+
+
 def test_k3_whole_string_rebuilds_typed_argument_elements():
     raw = tools(
         call(
@@ -89,6 +99,29 @@ def test_k3_whole_string_rebuilds_typed_argument_elements():
         "days": [1, 2],
     }
     assert text_events(events) == []
+
+
+def test_k3_think_and_response_elements_are_distinct_under_every_split():
+    raw = (
+        open_tag("message", role="assistant")
+        + open_tag("think")
+        + "private reasoning"
+        + close_tag("think")
+        + open_tag("response")
+        + "visible answer"
+        + close_tag("response")
+        + close_tag("message")
+        + END
+    )
+
+    for index in range(len(raw) + 1):
+        parser = KimiK3ToolParser()
+        events = parser.feed(raw[:index])
+        events.extend(parser.feed(raw[index:]))
+        events.extend(parser.finish())
+
+        assert "".join(event.text for event in reasoning_events(events)) == "private reasoning"
+        assert "".join(event.text for event in text_events(events)) == "visible answer"
 
 
 def test_k3_json_block_body_is_byte_identical():

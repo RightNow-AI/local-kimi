@@ -31,13 +31,18 @@ class ParsedText:
 
 
 @dataclass(slots=True)
+class ParsedReasoning:
+    text: str
+
+
+@dataclass(slots=True)
 class ParsedToolCall:
     name: str
     arguments: str
     id: str
 
 
-ParseEvent = Union[ParsedText, ParsedToolCall]
+ParseEvent = Union[ParsedText, ParsedReasoning, ParsedToolCall]
 
 
 def new_call_id(prefix: str = "call") -> str:
@@ -92,7 +97,7 @@ class ToolCallParser:
 
 
 class KimiToolParser(ToolCallParser):
-    """Kimi-family control tokens — the K3 native format.
+    """Legacy Kimi K2 control-token tool-call format.
 
     ``<|tool_calls_section_begin|>``
     ``<|tool_call_begin|>functions.NAME:IDX<|tool_call_argument_begin|>{...}<|tool_call_end|>``
@@ -277,6 +282,7 @@ class KimiK3ToolParser(ToolCallParser):
         self._buf = ""
         self._tools_depth = 0
         self._tools_text = ""
+        self._channel: Optional[str] = None
         self._call: Optional[_K3PendingCall] = None
 
     def feed(self, text: str) -> list[ParseEvent]:
@@ -295,6 +301,7 @@ class KimiK3ToolParser(ToolCallParser):
         self._flush_tools_text(events)
         self._buf = ""
         self._tools_depth = 0
+        self._channel = None
         return [e for e in events if not (isinstance(e, ParsedText) and not e.text)]
 
     def _drain(self, final: bool) -> list[ParseEvent]:
@@ -351,12 +358,17 @@ class KimiK3ToolParser(ToolCallParser):
         if self._tools_depth:
             self._tools_text += text
             return
-        out.append(ParsedText(text))
+        if self._channel == "think":
+            out.append(ParsedReasoning(text))
+        else:
+            out.append(ParsedText(text))
 
     def _handle_marker(self, token: str) -> None:
         if self._call is not None:
             self._call.raw.append(token)
             self._call.malformed = True
+        if token == self.END_OF_MSG:
+            self._channel = None
 
     def _handle_open(
         self,
@@ -375,6 +387,10 @@ class KimiK3ToolParser(ToolCallParser):
                 self._call.malformed = True
             return
 
+        if name in ("think", "response"):
+            # K3 carries private reasoning and visible output in sibling elements.
+            self._channel = name
+            return
         if name == "tools":
             self._flush_tools_text(out)
             self._tools_depth += 1
@@ -404,6 +420,10 @@ class KimiK3ToolParser(ToolCallParser):
             self._call.malformed = True
             return
 
+        if name in ("think", "response"):
+            if self._channel == name:
+                self._channel = None
+            return
         if name == "tools":
             self._flush_tools_text(out)
             if self._tools_depth:
@@ -766,6 +786,7 @@ def parse_all(parser: ToolCallParser, text: str) -> list[ParseEvent]:
 
 __all__ = [
     "ParsedText",
+    "ParsedReasoning",
     "ParsedToolCall",
     "ParseEvent",
     "ToolCallParser",

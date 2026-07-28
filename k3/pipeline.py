@@ -40,7 +40,7 @@ from .reasoning import (
     strip_inline_think,
     upstream_assistant_from_response,
 )
-from .toolcalls import ParsedText, ParsedToolCall, ToolCallParser, get_parser
+from .toolcalls import ParsedReasoning, ParsedText, ParsedToolCall, ToolCallParser, get_parser
 
 
 class EngineLike(Protocol):  # pragma: no cover - structural typing only
@@ -213,7 +213,7 @@ async def run(
     engine: EngineLike,
     payload: dict[str, Any],
     *,
-    tool_parser: str = "kimi",
+    tool_parser: str = "kimi_k3",
     ledger: Optional[ReasoningLedger] = None,
     reasoning_field: str = "reasoning_content",
     stream: bool = True,
@@ -254,7 +254,9 @@ async def run(
         nonlocal tool_index
         out: list[StreamEvent] = []
         for ev in events:
-            if isinstance(ev, ParsedText):
+            if isinstance(ev, ParsedReasoning):
+                out.extend(handle_reasoning(ev.text))
+            elif isinstance(ev, ParsedText):
                 if not ev.text:
                     continue
                 out.extend(close_reasoning())

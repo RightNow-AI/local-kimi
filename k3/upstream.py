@@ -275,7 +275,7 @@ class MockUpstream:
         self,
         cfg: Optional[UpstreamConfig] = None,
         delay: float = 0.0,
-        tool_parser: str = "kimi",
+        tool_parser: str = "kimi_k3",
     ) -> None:
         self.cfg = cfg or UpstreamConfig()
         self.delay = delay
@@ -380,7 +380,7 @@ _MOCK_K2_TOOL_CALL = (
 
 
 def _mock_generate(
-    payload: dict[str, Any], tool_parser: str = "kimi"
+    payload: dict[str, Any], tool_parser: str = "kimi_k3"
 ) -> tuple[str, str]:
     messages = payload.get("messages") or []
     tools = payload.get("tools") or []

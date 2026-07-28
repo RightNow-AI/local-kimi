@@ -16,9 +16,9 @@ recording yet — it is expected to work, and it is expected to be the thing tha
 breaks when the client ships an update. Promote a preset by recording real
 traffic (``k3 serve --record DIR``) and dropping the cassette in.
 
-``kimi`` and ``kimi_k2`` intentionally select the legacy K2 control-token
-parser. ``kimi_k3`` selects K3 XTML; defaults stay on K2 until their recorded
-fixtures are regenerated at the release gate.
+``kimi`` and ``kimi_k2`` select the legacy K2 control-token parser when an
+older engine needs it. K3 presets default to ``kimi_k3`` so production parses
+the XTML shape the model actually emits.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ CLAUDE_CODE = Preset(
     title="Claude Code",
     dialect="anthropic_messages",
     routes=["/v1/messages", "/v1/messages/count_tokens", "/v1/models"],
-    tool_parser="kimi",
+    tool_parser="kimi_k3",
     reasoning=ReasoningPolicy.THINKING_BLOCKS,
     template=TemplateConfig(tool_mode="native", system_mode="merge"),
     defaults=Defaults(
@@ -190,7 +190,7 @@ OPENAI = Preset(
     title="Generic OpenAI client",
     dialect="openai_chat",
     routes=["/v1/chat/completions", "/v1/models"],
-    tool_parser="kimi",
+    tool_parser="kimi_k3",
     reasoning=ReasoningPolicy.STRIP,
     template=TemplateConfig(tool_mode="native"),
     defaults=Defaults(max_tokens=8192),
@@ -214,7 +214,7 @@ CODEX = Preset(
     title="OpenAI Codex CLI",
     dialect="openai_responses",
     routes=["/v1/responses", "/v1/models"],
-    tool_parser="kimi",
+    tool_parser="kimi_k3",
     reasoning=ReasoningPolicy.RESPONSES_ITEM,
     template=TemplateConfig(tool_mode="native"),
     defaults=Defaults(max_tokens=32000, reasoning_effort="medium"),
@@ -254,7 +254,7 @@ KIMI_CODE = Preset(
     title="Kimi Code / Kimi CLI",
     dialect="openai_chat",
     routes=["/v1/chat/completions", "/v1/models"],
-    tool_parser="kimi",
+    tool_parser="kimi_k3",
     reasoning=ReasoningPolicy.REASONING_CONTENT,
     template=TemplateConfig(tool_mode="native"),
     defaults=Defaults(max_tokens=32000, temperature=0.6, reasoning_effort="medium"),
@@ -288,7 +288,7 @@ CLINE = Preset(
     title="Cline",
     dialect="openai_chat",
     routes=["/v1/chat/completions", "/v1/models"],
-    tool_parser="kimi",
+    tool_parser="kimi_k3",
     reasoning=ReasoningPolicy.REASONING_CONTENT,
     template=TemplateConfig(tool_mode="native"),
     defaults=Defaults(max_tokens=16384, temperature=0.0),
@@ -312,7 +312,7 @@ OPENCODE = Preset(
     title="OpenCode",
     dialect="openai_chat",
     routes=["/v1/chat/completions", "/v1/models"],
-    tool_parser="kimi",
+    tool_parser="kimi_k3",
     reasoning=ReasoningPolicy.REASONING_CONTENT,
     template=TemplateConfig(tool_mode="native"),
     defaults=Defaults(max_tokens=16384),
@@ -334,7 +334,7 @@ AIDER = Preset(
     title="Aider",
     dialect="openai_chat",
     routes=["/v1/chat/completions", "/v1/models"],
-    tool_parser="kimi",
+    tool_parser="kimi_k3",
     reasoning=ReasoningPolicy.INLINE_TAGS,
     template=TemplateConfig(tool_mode="native"),
     defaults=Defaults(max_tokens=16384, temperature=0.0),

@@ -69,9 +69,15 @@ class Session:
     def __init__(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="k3-fixtures-"))
         cfg = ServerConfig(
-            mock=True, record_dir=str(self.tmp), upstream=UpstreamConfig(model="k3")
+            mock=True,
+            tool_parser="kimi_k3",
+            record_dir=str(self.tmp),
+            upstream=UpstreamConfig(model="k3"),
         )
-        self.app = create_app(cfg, engine=MockUpstream(cfg.upstream))
+        # Pin fixture generation to the production K3 parser/emission pair.
+        self.app = create_app(
+            cfg, engine=MockUpstream(cfg.upstream, tool_parser=cfg.tool_parser or "kimi_k3")
+        )
 
     async def post(self, path: str, body: dict[str, Any], headers: dict[str, str]) -> httpx.Response:
         transport = httpx.ASGITransport(app=self.app)
