@@ -2,6 +2,11 @@
 
 ![local-kimi](assets/banner.jpeg)
 
+<sub>The sketch is illustrative. The model this repository actually runs on a
+32 GiB machine is Kimi-Linear-48B, measured. Kimi K3 is 2.78T parameters and
+roughly 1.56 TB of weights; it does not run on a laptop and nothing here changes
+that.</sub>
+
 `local-kimi` is primarily `k3/`, a protocol adapter between a local Kimi endpoint
 and clients that speak Anthropic Messages, OpenAI Chat Completions, or OpenAI
 Responses. It detects the client dialect per request, translates tools and
