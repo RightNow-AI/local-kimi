@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from engine.kernels.w4a16_grouped import grouped_w4a16_linear
+
 from .quantized import LinearFactory, W4A16Linear, make_linear
 from .router import KLinearRouter
 
@@ -16,6 +18,22 @@ ExpertProvider = Callable[
     [int, int, torch.device, torch.dtype],
     tuple[ExpertLinear, ExpertLinear, ExpertLinear],
 ]
+
+
+def shape_stable_expert_indices(
+    expert_indices: torch.Tensor,
+    shared_expert_id: int,
+) -> torch.Tensor:
+    """Append the shared expert as one fixed route for every token."""
+    if expert_indices.ndim != 2:
+        raise ValueError("expert_indices must have shape [tokens, routes]")
+    shared = torch.full(
+        (expert_indices.shape[0], 1),
+        shared_expert_id,
+        dtype=expert_indices.dtype,
+        device=expert_indices.device,
+    )
+    return torch.cat((expert_indices, shared), dim=1)
 
 
 class ExpertMLP(nn.Module):
@@ -174,6 +192,121 @@ class KLinearMoE(nn.Module):
             if shared_intermediate
             else None
         )
+        self.register_buffer("grouped_w1_packed", None, persistent=False)
+        self.register_buffer("grouped_w1_scales", None, persistent=False)
+        self.register_buffer("grouped_w2_packed", None, persistent=False)
+        self.register_buffer("grouped_w2_scales", None, persistent=False)
+        self.register_buffer("grouped_w3_packed", None, persistent=False)
+        self.register_buffer("grouped_w3_scales", None, persistent=False)
+
+    @property
+    def has_grouped_w4a16(self) -> bool:
+        return self.grouped_w1_packed is not None
+
+    @staticmethod
+    def _stack_and_release(
+        modules: list[W4A16Linear],
+        buffer_name: str,
+    ) -> torch.Tensor:
+        payloads = [getattr(module, buffer_name) for module in modules]
+        if any(payload is None for payload in payloads):
+            raise ValueError("cannot group an already released W4A16 payload")
+        grouped = torch.stack(payloads, dim=0).contiguous()
+        for module in modules:
+            module._buffers[buffer_name] = None
+        return grouped
+
+    def prepare_grouped_w4a16(self) -> None:
+        """Transfer real resident experts into contiguous per-layer banks."""
+        if self.has_grouped_w4a16:
+            return
+        if self.expert_provider is None:
+            return
+        if self.shared_experts is None:
+            raise ValueError("grouped W4A16 decode requires the shared expert")
+        shared = self.shared_experts
+        shared_linears = (
+            shared.gate_proj,
+            shared.down_proj,
+            shared.up_proj,
+        )
+        if not all(isinstance(module, W4A16Linear) for module in shared_linears):
+            return
+        device = self.gate.weight.device
+        dtype = self.gate.weight.dtype
+        routed = [
+            self.expert_provider(self.layer_idx, expert_id, device, dtype)
+            for expert_id in range(self.num_experts)
+        ]
+        if not all(
+            isinstance(module, W4A16Linear)
+            for weights in routed
+            for module in weights
+        ):
+            return
+
+        w1_modules = [weights[0] for weights in routed] + [shared.gate_proj]
+        w2_modules = [weights[1] for weights in routed] + [shared.down_proj]
+        w3_modules = [weights[2] for weights in routed] + [shared.up_proj]
+        self.grouped_w1_packed = self._stack_and_release(
+            w1_modules, "packed_weight"
+        )
+        self.grouped_w1_scales = self._stack_and_release(w1_modules, "scales")
+        self.grouped_w2_packed = self._stack_and_release(
+            w2_modules, "packed_weight"
+        )
+        self.grouped_w2_scales = self._stack_and_release(w2_modules, "scales")
+        self.grouped_w3_packed = self._stack_and_release(
+            w3_modules, "packed_weight"
+        )
+        self.grouped_w3_scales = self._stack_and_release(w3_modules, "scales")
+
+        provider_weights = getattr(self.expert_provider, "_weights", None)
+        if not isinstance(provider_weights, dict):
+            raise TypeError("resident W4A16 provider does not expose releasable weights")
+        for expert_id in range(self.num_experts):
+            provider_weights.pop((self.layer_idx, expert_id))
+
+    def _route_grouped_w4a16(
+        self,
+        hidden_states: torch.Tensor,
+        expert_indices: torch.Tensor,
+        expert_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        stable_indices = shape_stable_expert_indices(
+            expert_indices, self.num_experts
+        )
+        gate = grouped_w4a16_linear(
+            hidden_states,
+            stable_indices,
+            self.grouped_w1_packed,
+            self.grouped_w1_scales,
+        )
+        up = grouped_w4a16_linear(
+            hidden_states,
+            stable_indices,
+            self.grouped_w3_packed,
+            self.grouped_w3_scales,
+        )
+        activated = F.silu(gate) * up
+        expert_outputs = grouped_w4a16_linear(
+            activated.reshape(-1, self.intermediate_size),
+            stable_indices.reshape(-1, 1),
+            self.grouped_w2_packed,
+            self.grouped_w2_scales,
+        ).reshape(
+            hidden_states.shape[0],
+            self.top_k + 1,
+            self.hidden_size,
+        )
+        routed = (
+            expert_outputs[:, : self.top_k]
+            .float()
+            .mul(expert_weights.float().unsqueeze(-1))
+            .sum(dim=1)
+            .to(hidden_states.dtype)
+        )
+        return routed + expert_outputs[:, self.top_k]
 
     def _run_expert(self, expert_id: int, tokens: torch.Tensor) -> torch.Tensor:
         if self.expert_provider is None:
@@ -226,9 +359,14 @@ class KLinearMoE(nn.Module):
         original_shape = hidden_states.shape
         expert_indices, expert_weights = self.gate(hidden_states)
         flat_states = hidden_states.reshape(-1, original_shape[-1])
-        routed = self._route_experts(flat_states, expert_indices, expert_weights)
+        if self.has_grouped_w4a16:
+            routed = self._route_grouped_w4a16(
+                flat_states, expert_indices, expert_weights
+            )
+        else:
+            routed = self._route_experts(flat_states, expert_indices, expert_weights)
         routed = routed.view(original_shape)
-        if self.shared_experts is not None:
+        if self.shared_experts is not None and not self.has_grouped_w4a16:
             routed = routed + self.shared_experts(identity)
         if return_router:
             return routed, expert_indices, expert_weights
