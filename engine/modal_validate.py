@@ -45,6 +45,11 @@ IMAGE = (
     )
     .env({"VLLM_USE_V1": "1", "CUDA_HOME": "/usr/local/cuda"})
     .add_local_dir(Path(__file__).parent, remote_path="/root/engine")
+    # k3 is required by engine/serve, which reuses k3/toolcalls.py for the
+    # K2-family tool-call parser rather than carrying a third copy of it. Every
+    # Modal job that imports engine.serve needs this mount, and forgetting it
+    # fails only inside the container.
+    .add_local_dir(Path(__file__).parent.parent / "k3", remote_path="/root/k3")
 )
 
 
