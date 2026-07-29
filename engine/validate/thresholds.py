@@ -17,7 +17,18 @@ class EngineParityThresholds:
     reasoning: tuple[str, ...]
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        """Return the threshold in JSON-native types.
+
+        asdict preserves the tuple, and a tuple survives json.dump as a list, so
+        comparing a freshly built dict against one that has been through a file
+        raised "runtime threshold differs from the predeclared source threshold"
+        on a run where nothing had actually changed. The guard is right to exist
+        and was firing on a serialisation artifact, so the fix is to make both
+        sides the same shape rather than to loosen the comparison.
+        """
+        data = asdict(self)
+        data["reasoning"] = list(data["reasoning"])
+        return data
 
 
 ENGINE_PARITY_V1 = EngineParityThresholds(
