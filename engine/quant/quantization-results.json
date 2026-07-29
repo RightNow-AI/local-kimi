@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "evidenceType": "quantization",
+  "humanDocument": "QUANTIZATION-RESULTS.md",
+  "runIdentity": {
+    "producer": "engine/modal_quantize_klinear.py",
+    "artifactVolume": "kimi-linear-quantized",
+    "artifactPath": "Kimi-Linear-48B-A3B-Instruct-W4A16"
+  },
+  "documentChecks": [
+    "Produced by engine/modal_quantize_klinear.py on one H100 from the real BF16 checkpoint",
+    "Artifact: volume kimi-linear-quantized, path Kimi-Linear-48B-A3B-Instruct-W4A16"
+  ],
+  "hardware": {
+    "artifact": {
+      "accelerator": "H100",
+      "acceleratorCount": 1,
+      "evidenceStatus": "MEASURED"
+    }
+  },
+  "conditions": "Real BF16 checkpoint, symmetric signed INT4, group size 32, BF16 scales, selective tensor policy",
+  "values": {
+    "sourceTensorBytes": {
+      "value": 98245528576,
+      "displayValue": "98,245,528,576",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Source tensor storage, BF16 as shipped",
+          "98,245,528,576"
+        ],
+        "displayValue": "98,245,528,576"
+      }
+    },
+    "outputTensorBytes": {
+      "value": 28803304448,
+      "displayValue": "28,803,304,448",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Output tensor storage, INT4 selective",
+          "28,803,304,448"
+        ],
+        "displayValue": "28,803,304,448"
+      }
+    },
+    "weightByteReduction": {
+      "value": 3.41,
+      "displayValue": "3.41x",
+      "unit": "x",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "3.41x reduction in weight bytes"
+        ],
+        "displayValue": "3.41x",
+        "decimalPlaces": 2
+      }
+    },
+    "plannedTensorBytes": {
+      "value": 28803304448,
+      "displayValue": "28,803,304,448",
+      "unit": "bytes",
+      "evidenceStatus": "PROJECTED",
+      "markdown": {
+        "contains": [
+          "The plan projected 28,803,304,448 bytes"
+        ],
+        "displayValue": "28,803,304,448"
+      }
+    },
+    "quantizedTensorCount": {
+      "value": 20150,
+      "displayValue": "20,150",
+      "unit": "tensors",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "20,150 tensors quantized, 343 retained in source precision"
+        ],
+        "displayValue": "20,150"
+      }
+    },
+    "retainedTensorCount": {
+      "value": 343,
+      "displayValue": "343",
+      "unit": "tensors",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "20,150 tensors quantized, 343 retained in source precision"
+        ],
+        "displayValue": "343"
+      }
+    },
+    "wrongGroupAxisDecoder": {
+      "value": "REJECTED as required",
+      "displayValue": "REJECTED as required",
+      "unit": "result",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "wrong_group_axis decoder rejected on real data",
+          "REJECTED as required"
+        ]
+      }
+    },
+    "wrongScaleDecoder": {
+      "value": "REJECTED as required",
+      "displayValue": "REJECTED as required",
+      "unit": "result",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "wrong_scale decoder rejected on real data",
+          "REJECTED as required"
+        ]
+      }
+    },
+    "swappedNibblesDecoder": {
+      "value": "REJECTED as required",
+      "displayValue": "REJECTED as required",
+      "unit": "result",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "swapped_nibbles decoder rejected on real data",
+          "REJECTED as required"
+        ]
+      }
+    }
+  }
+}

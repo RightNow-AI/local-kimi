@@ -1,0 +1,193 @@
+{
+  "schemaVersion": 1,
+  "evidenceType": "shared-expert-experiment",
+  "profile": "shared-experts-bf16",
+  "humanDocument": "SHARED-EXPERT-EXPERIMENT.md",
+  "runIdentity": {
+    "profile": "shared-experts-bf16",
+    "artifactProducer": "engine/modal_quantize_klinear.py",
+    "accuracyProducer": "engine/modal_accuracy.py"
+  },
+  "documentChecks": [
+    "shared-experts-bf16",
+    "one H100",
+    "one H200"
+  ],
+  "hardware": {
+    "artifact": {
+      "accelerator": "H100",
+      "acceleratorCount": 1,
+      "evidenceStatus": "MEASURED"
+    },
+    "accuracy": {
+      "accelerator": "H200",
+      "acceleratorCount": 1,
+      "evidenceStatus": "MEASURED"
+    }
+  },
+  "conditions": "Shared-expert tensors retained in BF16; remaining selective INT4 policy unchanged; paired accuracy protocol matches the default profile",
+  "values": {
+    "outputTensorBytes": {
+      "value": 29067840512,
+      "displayValue": "29,067,840,512",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "29,067,840,512"
+        ],
+        "displayValue": "29,067,840,512"
+      }
+    },
+    "plannedTensorBytes": {
+      "value": 29067840512,
+      "displayValue": "29,067,840,512",
+      "unit": "bytes",
+      "evidenceStatus": "PROJECTED",
+      "markdown": {
+        "contains": [
+          "29,067,840,512"
+        ],
+        "displayValue": "29,067,840,512"
+      }
+    },
+    "additionalBytesVersusDefault": {
+      "value": 264536064,
+      "displayValue": "264,536,064",
+      "unit": "bytes",
+      "evidenceStatus": "SOURCE_DERIVED",
+      "markdown": {
+        "contains": [
+          "264,536,064"
+        ],
+        "displayValue": "264,536,064"
+      }
+    },
+    "quantizedTensorCount": {
+      "value": 20072,
+      "displayValue": "20,072",
+      "unit": "tensors",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "20,072"
+        ],
+        "displayValue": "20,072"
+      }
+    },
+    "retainedTensorCount": {
+      "value": 421,
+      "displayValue": "421",
+      "unit": "tensors",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "421"
+        ],
+        "displayValue": "421"
+      }
+    },
+    "perplexityBaseline": {
+      "value": 12.712,
+      "displayValue": "12.712",
+      "unit": "perplexity",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "12.712"
+        ],
+        "displayValue": "12.712",
+        "decimalPlaces": 3
+      }
+    },
+    "perplexityCandidate": {
+      "value": 12.960,
+      "displayValue": "12.960",
+      "unit": "perplexity",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "12.960"
+        ],
+        "displayValue": "12.960",
+        "decimalPlaces": 3
+      }
+    },
+    "perplexityIncreasePercent": {
+      "value": 1.95,
+      "displayValue": "+1.95%",
+      "unit": "%",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "+1.95%"
+        ],
+        "displayValue": "+1.95%",
+        "decimalPlaces": 2
+      }
+    },
+    "top1AgreementPercent": {
+      "value": 91.41,
+      "displayValue": "91.41%",
+      "unit": "%",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "91.41%"
+        ],
+        "displayValue": "91.41%",
+        "decimalPlaces": 2
+      }
+    },
+    "meanKlNats": {
+      "value": 0.0398,
+      "displayValue": "0.0398",
+      "unit": "nats",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "0.0398"
+        ],
+        "displayValue": "0.0398",
+        "decimalPlaces": 4
+      }
+    },
+    "greedyIdentityPercent": {
+      "value": 40.77,
+      "displayValue": "40.77%",
+      "unit": "%",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "40.77%"
+        ],
+        "displayValue": "40.77%",
+        "decimalPlaces": 2
+      }
+    },
+    "routerSetAgreementPercent": {
+      "value": 36.74,
+      "displayValue": "36.74%",
+      "unit": "%",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "36.74%"
+        ],
+        "displayValue": "36.74%",
+        "decimalPlaces": 2
+      }
+    },
+    "verdict": {
+      "value": "FAIL",
+      "displayValue": "FAIL",
+      "unit": "verdict",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Verdict: FAIL"
+        ]
+      }
+    }
+  }
+}

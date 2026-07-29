@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "evidenceType": "serving",
+  "humanDocument": "INT4-SERVING-RESULTS.md",
+  "runIdentity": {
+    "producer": "engine/modal_klinear_int4.py",
+    "checkpointKind": "w4a16",
+    "inputArtifactProducer": "engine/modal_quantize_klinear.py"
+  },
+  "documentChecks": [
+    "Produced by engine/modal_klinear_int4.py on one NVIDIA H100 80GB HBM3",
+    "Checkpoint kind, detected from the index w4a16"
+  ],
+  "hardware": {
+    "serving": {
+      "accelerator": "NVIDIA H100 80GB HBM3",
+      "acceleratorCount": 1,
+      "evidenceStatus": "MEASURED"
+    }
+  },
+  "conditions": "Full selective INT4 checkpoint, one short greedy generation, one prompt, packed W4A16 weights kept packed",
+  "values": {
+    "residentWeightBytes": {
+      "value": 28803304448,
+      "displayValue": "28,803,304,448",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Resident weight bytes",
+          "28,803,304,448"
+        ],
+        "displayValue": "28,803,304,448"
+      }
+    },
+    "checkpointTensorBytes": {
+      "value": 28803304448,
+      "displayValue": "28,803,304,448",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Checkpoint tensor storage",
+          "28,803,304,448"
+        ],
+        "displayValue": "28,803,304,448"
+      }
+    },
+    "peakReservedBytes": {
+      "value": 30511464448,
+      "displayValue": "30,511,464,448",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Peak reserved after generation",
+          "30,511,464,448"
+        ],
+        "displayValue": "30,511,464,448"
+      }
+    },
+    "coherentOutputObserved": {
+      "value": true,
+      "displayValue": "true",
+      "unit": "boolean",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "produces coherent text"
+        ]
+      }
+    },
+    "layerCount": {
+      "value": 27,
+      "displayValue": "27",
+      "unit": "layers",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Layers",
+          "all 27"
+        ],
+        "displayValue": "27"
+      }
+    },
+    "expertsPerMoeLayer": {
+      "value": 256,
+      "displayValue": "256",
+      "unit": "experts",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Experts",
+          "all 256 per MoE layer"
+        ],
+        "displayValue": "256"
+      }
+    },
+    "stockVllmVersion": {
+      "value": "0.26.0",
+      "displayValue": "0.26.0",
+      "unit": "version",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Stock vLLM 0.26.0 refuses this model below BF16"
+        ]
+      }
+    },
+    "stockVllmBelowBf16": {
+      "value": "REFUSED",
+      "displayValue": "REFUSED",
+      "unit": "result",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Stock vLLM 0.26.0 refuses this model below BF16"
+        ]
+      }
+    },
+    "stockVllmWeightFloorBytes": {
+      "value": 98245528576,
+      "displayValue": "98,245,528,576",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "needs 98,245,528,576 bytes of weights"
+        ],
+        "displayValue": "98,245,528,576"
+      }
+    },
+    "speedComparisonAgainstVllm": {
+      "value": "NOT_MEASURED",
+      "displayValue": "NOT_MEASURED",
+      "unit": "status",
+      "evidenceStatus": "SOURCE_DERIVED",
+      "markdown": {
+        "contains": [
+          "No speed comparison against vLLM has been measured, and none is claimed"
+        ]
+      }
+    }
+  }
+}

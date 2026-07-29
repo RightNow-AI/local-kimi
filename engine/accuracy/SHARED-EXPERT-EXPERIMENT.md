@@ -43,6 +43,15 @@ prompts, identical sampling, byte-identical served configs.
 | Perplexity increase vs BF16 | +0.81% | +1.95% | **worse** |
 | **Verdict** | **FAIL** | **FAIL** | unchanged |
 
+## Verdict: FAIL
+
+Both profiles fail the thresholds declared before the run. The retained-shared-
+expert profile improves distributional agreement substantially and moves router
+agreement only 2.44 points, which is not enough to call the quantized model
+behaviourally equivalent to the original. Stated here in one line because a
+verdict a reader has to extract from a comparison table is a verdict that can be
+misread.
+
 ## What this establishes
 
 **The hypothesis is partially confirmed and the suspect is largely ruled out.**
