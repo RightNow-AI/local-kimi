@@ -43,6 +43,11 @@ if triton is not None:
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        # Passed in rather than read from the module. Triton refuses a plain
+        # global inside a jitted function, and this failed at compile time on
+        # the GPU with "Cannot access global variable GROUP_SIZE from within
+        # @jit'ed function".
+        GROUP: tl.constexpr,
     ):
         assignment = tl.program_id(0)
         block_n = tl.program_id(1)
@@ -87,7 +92,7 @@ if triton is not None:
                 scale_ptr
                 + expert * stride_se
                 + offsets_n[None, :] * stride_sn
-                + (current_k[:, None] // GROUP_SIZE) * stride_sk,
+                + (current_k[:, None] // GROUP) * stride_sk,
                 mask=(offsets_n[None, :] < N) & (current_k[:, None] < K),
                 other=1.0,
             )
@@ -184,5 +189,6 @@ def grouped_w4a16_linear(
             BLOCK_M=16,
             BLOCK_N=64,
             BLOCK_K=64,
+            GROUP=GROUP_SIZE,
         )
     return output
