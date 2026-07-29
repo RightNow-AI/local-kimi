@@ -10,6 +10,39 @@
 The proxy is alpha software. The engine work is research code, not a complete
 or production-qualified Kimi K3 serving engine.
 
+## Read this before you use the engine
+
+**If you want to run Kimi-Linear-48B on a consumer GPU today, use llama.cpp, not
+this.** A GGUF conversion already exists at
+[AaryanK/Kimi-Linear-48B-A3B-Instruct-GGUF](https://huggingface.co/AaryanK/Kimi-Linear-48B-A3B-Instruct-GGUF)
+with Q4_K_S at 27.9 GB and Q2_K at 18 GB, and
+[llama.cpp PR 17592](https://github.com/ggml-org/llama.cpp/pull/17592) reports
+roughly 32 tokens per second generation and 450 prompt processing on an RTX
+3090. Our engine currently generates at 0.67 to 3.39 tokens per second, measured
+on an L40S under a 32 GiB cap. That is between 10 and 50 times slower.
+
+We found this out after building the engine, not before, and the honest thing to
+do is put it at the top rather than let you discover it yourself.
+
+What this repository is actually good for:
+
+- **`k3/`, the protocol adapter.** This is the genuinely distinct piece. It
+  serves one Kimi endpoint to Anthropic Messages, OpenAI Chat Completions and
+  OpenAI Responses clients, auto-detecting the dialect per request, and it
+  preserves reasoning content byte-exactly across turns so a thinking block
+  survives a round trip. llama.cpp does not do this and is not trying to.
+- **The verification tooling.** A quantization verifier whose three negative
+  controls must FAIL on a wrong decoder, a residency model that predicted real
+  GPU allocation to the byte, and a paired accuracy harness that isolates
+  quantization damage from engine differences. These are reusable against other
+  models.
+- **The measurements and the negative results**, which are recorded whether or
+  not they flattered the work.
+
+If you want a fast local Kimi, use llama.cpp. If you want to serve Kimi to a
+coding agent that speaks a different wire format, or you want to check a
+quantization honestly, there is something here.
+
 ## Current evidence boundary
 
 What is measured:
