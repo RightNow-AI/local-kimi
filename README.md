@@ -28,14 +28,31 @@ is in [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md),
 
 ## Backend position
 
-For local Kimi-Linear-48B inference, use llama.cpp as the backend. A GGUF exists
-at
+Two backends can serve Kimi-Linear-48B locally in about 28 GB of weights.
+
+**llama.cpp** is the mature option. A GGUF exists at
 [AaryanK/Kimi-Linear-48B-A3B-Instruct-GGUF](https://huggingface.co/AaryanK/Kimi-Linear-48B-A3B-Instruct-GGUF)
 with Q4_K_S at 27.9 GB, and
 [llama.cpp PR 17592](https://github.com/ggml-org/llama.cpp/pull/17592) reports
-roughly 32 tokens per second on an RTX 3090. The engine in this repository is
-research code and measures 0.67 to 3.39 tokens per second. It is not the
-recommended local backend.
+roughly 32 tokens per second on an RTX 3090. If you want something that works
+today with the least friction, use it.
+
+**The engine here** now measures 35.71 tokens per second on an NVIDIA L40S,
+single stream, greedy, with byte-identical token ids against its own
+pre-optimisation reference, inside a hard 32 GiB cap. See
+[`engine/klinear/DECODE-BENCHMARK.md`](engine/klinear/DECODE-BENCHMARK.md).
+
+**These two numbers are not a comparison.** Different GPU, different harness,
+different prompt. Nothing here says this engine is faster than llama.cpp, and
+the measurement to settle that has not been run. What changed is that the engine
+went from unusable to usable: 9.02 to 35.71 tokens per second in the same
+benchmark, a 3.96x improvement, from removing an O(n squared) KV reprojection,
+preallocating state, grouping 27 expert GEMMs per layer into 3 launches, and
+capturing the decode step as a CUDA graph.
+
+The speedup cost memory. Peak reserved is now 10.5 MB under a 32 GiB budget
+where the unoptimised path had 3.58 GiB of headroom, so treat 32 GiB as the
+floor for this configuration rather than a comfortable target.
 
 The distinct component here is `k3/`. llama.cpp provides a raw OpenAI-compatible
 endpoint. `k3` adds Anthropic Messages and OpenAI Responses surfaces alongside
