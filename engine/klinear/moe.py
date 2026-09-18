@@ -8,11 +8,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .quantized import LinearFactory, W4A16Linear, make_linear
 from .router import KLinearRouter
 
+ExpertLinear = torch.Tensor | W4A16Linear
 ExpertProvider = Callable[
     [int, int, torch.device, torch.dtype],
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    tuple[ExpertLinear, ExpertLinear, ExpertLinear],
 ]
 
 
@@ -22,14 +24,36 @@ class ExpertMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         *,
+        tensor_prefix: str = "expert",
+        linear_factory: LinearFactory | None = None,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
-        factory = {"device": device, "dtype": dtype}
-        self.w1 = nn.Linear(hidden_size, intermediate_size, bias=False, **factory)
-        self.w2 = nn.Linear(intermediate_size, hidden_size, bias=False, **factory)
-        self.w3 = nn.Linear(hidden_size, intermediate_size, bias=False, **factory)
+        self.w1 = make_linear(
+            f"{tensor_prefix}.w1.weight",
+            hidden_size,
+            intermediate_size,
+            linear_factory=linear_factory,
+            device=device,
+            dtype=dtype,
+        )
+        self.w2 = make_linear(
+            f"{tensor_prefix}.w2.weight",
+            intermediate_size,
+            hidden_size,
+            linear_factory=linear_factory,
+            device=device,
+            dtype=dtype,
+        )
+        self.w3 = make_linear(
+            f"{tensor_prefix}.w3.weight",
+            hidden_size,
+            intermediate_size,
+            linear_factory=linear_factory,
+            device=device,
+            dtype=dtype,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(hidden_states)) * self.w3(hidden_states))
@@ -41,14 +65,36 @@ class DenseMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         *,
+        tensor_prefix: str = "mlp",
+        linear_factory: LinearFactory | None = None,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
-        factory = {"device": device, "dtype": dtype}
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False, **factory)
-        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False, **factory)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False, **factory)
+        self.gate_proj = make_linear(
+            f"{tensor_prefix}.gate_proj.weight",
+            hidden_size,
+            intermediate_size,
+            linear_factory=linear_factory,
+            device=device,
+            dtype=dtype,
+        )
+        self.up_proj = make_linear(
+            f"{tensor_prefix}.up_proj.weight",
+            hidden_size,
+            intermediate_size,
+            linear_factory=linear_factory,
+            device=device,
+            dtype=dtype,
+        )
+        self.down_proj = make_linear(
+            f"{tensor_prefix}.down_proj.weight",
+            intermediate_size,
+            hidden_size,
+            linear_factory=linear_factory,
+            device=device,
+            dtype=dtype,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.down_proj(
@@ -73,6 +119,8 @@ class KLinearMoE(nn.Module):
         routed_scaling_factor: float = 1.0,
         router_activation: str = "sigmoid",
         expert_provider: ExpertProvider | None = None,
+        tensor_prefix: str = "block_sparse_moe",
+        linear_factory: LinearFactory | None = None,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
@@ -102,10 +150,12 @@ class KLinearMoE(nn.Module):
                     ExpertMLP(
                         hidden_size,
                         intermediate_size,
+                        tensor_prefix=f"{tensor_prefix}.experts.{expert_id}",
+                        linear_factory=linear_factory,
                         device=device,
                         dtype=dtype,
                     )
-                    for _ in range(num_experts)
+                    for expert_id in range(num_experts)
                 ]
             )
         else:
@@ -116,6 +166,8 @@ class KLinearMoE(nn.Module):
             DenseMLP(
                 hidden_size,
                 shared_intermediate,
+                tensor_prefix=f"{tensor_prefix}.shared_experts",
+                linear_factory=linear_factory,
                 device=device,
                 dtype=dtype,
             )
@@ -129,6 +181,12 @@ class KLinearMoE(nn.Module):
         w1, w2, w3 = self.expert_provider(
             self.layer_idx, expert_id, tokens.device, tokens.dtype
         )
+        if isinstance(w1, W4A16Linear):
+            if not isinstance(w2, W4A16Linear) or not isinstance(w3, W4A16Linear):
+                raise TypeError("expert provider returned mixed linear weight types")
+            return w2(F.silu(w1(tokens)) * w3(tokens))
+        if isinstance(w2, W4A16Linear) or isinstance(w3, W4A16Linear):
+            raise TypeError("expert provider returned mixed linear weight types")
         return F.linear(F.silu(F.linear(tokens, w1)) * F.linear(tokens, w3), w2)
 
     @torch.no_grad()

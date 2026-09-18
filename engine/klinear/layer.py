@@ -7,11 +7,14 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from engine.quant.w4a16 import W4A16Tensor
+
 from .attention import KDAAttention, MLAAttention
 from .config import KLinearConfig, LayerKind
 from .manifest import TensorSpec, real_layer_manifest
 from .moe import DenseMLP, ExpertProvider, KLinearMoE
 from .norm import RMSNorm
+from .quantized import LinearFactory, W4A16Linear
 from .state import KDALayerState, LayerState, MLALayerState
 from .weights import SafetensorIndexStore
 
@@ -41,6 +44,7 @@ class KLinearDecoderLayer(nn.Module):
         layer_idx: int,
         *,
         expert_provider: ExpertProvider | None = None,
+        linear_factory: LinearFactory | None = None,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
@@ -57,6 +61,8 @@ class KLinearDecoderLayer(nn.Module):
                 config.kda_head_dim,
                 conv_size=config.short_conv_kernel_size,
                 rms_norm_eps=config.rms_norm_eps,
+                tensor_prefix=f"model.layers.{layer_idx}.self_attn",
+                linear_factory=linear_factory,
                 device=device,
                 dtype=dtype,
             )
@@ -70,6 +76,8 @@ class KLinearDecoderLayer(nn.Module):
                 config.qk_rope_head_dim,
                 config.v_head_dim,
                 rms_norm_eps=1e-6,
+                tensor_prefix=f"model.layers.{layer_idx}.self_attn",
+                linear_factory=linear_factory,
                 device=device,
                 dtype=dtype,
             )
@@ -89,6 +97,8 @@ class KLinearDecoderLayer(nn.Module):
                 routed_scaling_factor=config.routed_scaling_factor,
                 router_activation=config.moe_router_activation_func,
                 expert_provider=expert_provider,
+                tensor_prefix=f"model.layers.{layer_idx}.block_sparse_moe",
+                linear_factory=linear_factory,
                 device=device,
                 dtype=dtype,
             )
@@ -98,6 +108,8 @@ class KLinearDecoderLayer(nn.Module):
             self.mlp = DenseMLP(
                 config.hidden_size,
                 config.intermediate_size,
+                tensor_prefix=f"model.layers.{layer_idx}.mlp",
+                linear_factory=linear_factory,
                 device=device,
                 dtype=dtype,
             )
@@ -187,6 +199,30 @@ class KLinearDecoderLayer(nn.Module):
             _replace_parameter(module, parameter, tensor)
             loaded.add(suffix)
 
+        def load_linear(module: nn.Module, suffix: str) -> None:
+            spec = expected[suffix]
+            if len(spec.shape) != 2 or spec.dtype != "BF16":
+                raise ValueError(f"linear tensor has an invalid source spec: {suffix}")
+            payload = store.load_linear_weight(
+                prefix + suffix,
+                spec.shape,
+                device=device,
+                dtype=dtype,
+            )
+            if isinstance(payload, W4A16Tensor):
+                if not isinstance(module, W4A16Linear):
+                    raise TypeError(
+                        f"{prefix + suffix} is packed but the model built a BF16 linear"
+                    )
+                module.load_encoded(payload)
+            else:
+                if isinstance(module, W4A16Linear):
+                    raise TypeError(
+                        f"{prefix + suffix} is retained BF16 but the model built W4A16"
+                    )
+                _replace_parameter(module, "weight", payload)
+            loaded.add(suffix)
+
         if self.is_kda:
             for name in (
                 "q_proj",
@@ -199,10 +235,8 @@ class KLinearDecoderLayer(nn.Module):
                 "g_b_proj",
                 "o_proj",
             ):
-                load_parameter(
-                    getattr(self.self_attn, name),
-                    "weight",
-                    f"self_attn.{name}.weight",
+                load_linear(
+                    getattr(self.self_attn, name), f"self_attn.{name}.weight"
                 )
             for name in ("q_conv1d", "k_conv1d", "v_conv1d"):
                 load_parameter(
@@ -217,10 +251,8 @@ class KLinearDecoderLayer(nn.Module):
             )
         else:
             for name in ("q_proj", "kv_a_proj_with_mqa", "kv_b_proj", "o_proj"):
-                load_parameter(
-                    getattr(self.self_attn, name),
-                    "weight",
-                    f"self_attn.{name}.weight",
+                load_linear(
+                    getattr(self.self_attn, name), f"self_attn.{name}.weight"
                 )
             load_parameter(
                 self.self_attn.kv_a_layernorm,
@@ -238,16 +270,13 @@ class KLinearDecoderLayer(nn.Module):
             )
             if moe.shared_experts is not None:
                 for name in ("gate_proj", "up_proj", "down_proj"):
-                    load_parameter(
+                    load_linear(
                         getattr(moe.shared_experts, name),
-                        "weight",
                         f"block_sparse_moe.shared_experts.{name}.weight",
                     )
         else:
             for name in ("gate_proj", "up_proj", "down_proj"):
-                load_parameter(
-                    getattr(self.mlp, name), "weight", f"mlp.{name}.weight"
-                )
+                load_linear(getattr(self.mlp, name), f"mlp.{name}.weight")
 
         load_parameter(self.input_layernorm, "weight", "input_layernorm.weight")
         load_parameter(

@@ -12,8 +12,14 @@ from .config import KLinearConfig
 from .layer import KLinearDecoderLayer, _replace_parameter
 from .manifest import REAL_MODEL_TENSOR_MANIFEST
 from .norm import RMSNorm
+from .quantized import LinearFactory
 from .state import KLinearDecodeState, LayerState, MLALayerState
-from .weights import SafetensorExpertProvider, SafetensorIndexStore
+from .weights import (
+    CheckpointKind,
+    SafetensorExpertProvider,
+    SafetensorIndexStore,
+    W4A16ExpertProvider,
+)
 
 
 @dataclass
@@ -80,6 +86,7 @@ class KLinearModel(nn.Module):
         config: KLinearConfig,
         *,
         expert_provider=None,
+        linear_factory: LinearFactory | None = None,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
@@ -98,6 +105,7 @@ class KLinearModel(nn.Module):
                     config,
                     layer_idx,
                     expert_provider=expert_provider,
+                    linear_factory=linear_factory,
                     device=device,
                     dtype=dtype,
                 )
@@ -133,18 +141,33 @@ class KLinearModel(nn.Module):
         config = KLinearConfig.from_json(directory / "config.json")
         _validate_real_config(config)
         store = SafetensorIndexStore(directory, validate_real_layout=True)
-        expert_provider = SafetensorExpertProvider(
-            store, cache_entries=expert_cache_entries
-        )
+        if store.checkpoint_kind is CheckpointKind.W4A16:
+            if dtype != torch.bfloat16:
+                raise TypeError("W4A16 checkpoint loading requires torch.bfloat16")
+            expert_provider = W4A16ExpertProvider(store, device=device)
+        else:
+            expert_provider = SafetensorExpertProvider(
+                store, cache_entries=expert_cache_entries
+            )
         model = cls(
             config,
             expert_provider=expert_provider,
+            linear_factory=store.linear_factory(),
             device="meta",
             dtype=dtype,
         )
         model.load_checkpoint_weights(store, device=device, dtype=dtype)
         model._weight_store = store
         model._expert_provider = expert_provider
+        if (
+            store.checkpoint_kind is CheckpointKind.W4A16
+            and model.resident_weight_bytes != store.tensor_storage_bytes
+        ):
+            raise ValueError(
+                "resident W4A16 bytes disagree with checkpoint tensor storage: "
+                f"resident={model.resident_weight_bytes}, "
+                f"checkpoint={store.tensor_storage_bytes}"
+            )
         model.eval()
         return model
 
@@ -165,6 +188,37 @@ class KLinearModel(nn.Module):
             _replace_parameter(module, "weight", tensor)
         for layer in self.layers:
             layer.load_checkpoint_weights(store, device=device, dtype=dtype)
+
+    @property
+    def resident_weight_bytes(self) -> int:
+        """Return bytes held by loaded parameters, buffers, and expert weights."""
+        tensors = tuple(self.parameters()) + tuple(self.buffers())
+        meta_names = [
+            name
+            for name, tensor in (
+                tuple(self.named_parameters()) + tuple(self.named_buffers())
+            )
+            if tensor.device.type == "meta"
+        ]
+        if meta_names:
+            raise RuntimeError(f"model still has unloaded meta tensors: {meta_names}")
+        module_bytes = sum(
+            tensor.numel() * tensor.element_size() for tensor in tensors
+        )
+        provider_bytes = getattr(self._expert_provider, "resident_bytes", 0)
+        return module_bytes + provider_bytes
+
+    @property
+    def checkpoint_tensor_storage_bytes(self) -> int | None:
+        if self._weight_store is None:
+            return None
+        return self._weight_store.tensor_storage_bytes
+
+    @property
+    def checkpoint_kind(self) -> str | None:
+        if self._weight_store is None:
+            return None
+        return self._weight_store.checkpoint_kind.value
 
     def empty_state(self) -> KLinearDecodeState:
         return KLinearDecodeState.empty(self.config.num_hidden_layers)

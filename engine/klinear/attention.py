@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .norm import RMSGatedNorm, RMSNorm
+from .quantized import LinearFactory, make_linear
 from .state import KDALayerState, MLALayerState
 
 
@@ -74,20 +75,31 @@ class KDAAttention(nn.Module):
         *,
         conv_size: int = 4,
         rms_norm_eps: float = 1e-5,
+        tensor_prefix: str = "self_attn",
+        linear_factory: LinearFactory | None = None,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
-        factory = {"device": device, "dtype": dtype}
         projection_size = num_heads * head_dim
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.projection_size = projection_size
 
-        self.q_proj = nn.Linear(hidden_size, projection_size, bias=False, **factory)
-        self.k_proj = nn.Linear(hidden_size, projection_size, bias=False, **factory)
-        self.v_proj = nn.Linear(hidden_size, projection_size, bias=False, **factory)
+        def projection(name: str, input_size: int, output_size: int) -> nn.Module:
+            return make_linear(
+                f"{tensor_prefix}.{name}.weight",
+                input_size,
+                output_size,
+                linear_factory=linear_factory,
+                device=device,
+                dtype=dtype,
+            )
+
+        self.q_proj = projection("q_proj", hidden_size, projection_size)
+        self.k_proj = projection("k_proj", hidden_size, projection_size)
+        self.v_proj = projection("v_proj", hidden_size, projection_size)
         self.q_conv1d = DepthwiseShortConv(
             projection_size, conv_size, device=device, dtype=dtype
         )
@@ -102,19 +114,19 @@ class KDAAttention(nn.Module):
                 torch.empty(num_heads, device=device, dtype=torch.float32).uniform_(1, 16)
             ).view(1, 1, num_heads, 1)
         )
-        self.f_a_proj = nn.Linear(hidden_size, head_dim, bias=False, **factory)
-        self.f_b_proj = nn.Linear(head_dim, projection_size, bias=False, **factory)
+        self.f_a_proj = projection("f_a_proj", hidden_size, head_dim)
+        self.f_b_proj = projection("f_b_proj", head_dim, projection_size)
         self.dt_bias = nn.Parameter(
             torch.empty(projection_size, device=device, dtype=torch.float32)
         )
         nn.init.zeros_(self.dt_bias)
-        self.b_proj = nn.Linear(hidden_size, num_heads, bias=False, **factory)
-        self.g_a_proj = nn.Linear(hidden_size, head_dim, bias=False, **factory)
-        self.g_b_proj = nn.Linear(head_dim, projection_size, bias=False, **factory)
+        self.b_proj = projection("b_proj", hidden_size, num_heads)
+        self.g_a_proj = projection("g_a_proj", hidden_size, head_dim)
+        self.g_b_proj = projection("g_b_proj", head_dim, projection_size)
         self.o_norm = RMSGatedNorm(
             head_dim, eps=rms_norm_eps, device=device, dtype=dtype
         )
-        self.o_proj = nn.Linear(projection_size, hidden_size, bias=False, **factory)
+        self.o_proj = projection("o_proj", projection_size, hidden_size)
 
     def _decay_gate(self, raw_gate: torch.Tensor) -> torch.Tensor:
         biased = raw_gate.float() + self.dt_bias.float().view(
@@ -233,13 +245,14 @@ class MLAAttention(nn.Module):
         v_head_dim: int,
         *,
         rms_norm_eps: float = 1e-6,
+        tensor_prefix: str = "self_attn",
+        linear_factory: LinearFactory | None = None,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         if num_key_value_heads != num_heads:
             raise ValueError("the real Kimi-Linear checkpoint uses equal query and KV heads")
-        factory = {"device": device, "dtype": dtype}
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_key_value_heads = num_key_value_heads
@@ -250,23 +263,34 @@ class MLAAttention(nn.Module):
         self.v_head_dim = v_head_dim
         self.scaling = self.q_head_dim**-0.5
 
-        self.q_proj = nn.Linear(
-            hidden_size, num_heads * self.q_head_dim, bias=False, **factory
+        def projection(name: str, input_size: int, output_size: int) -> nn.Module:
+            return make_linear(
+                f"{tensor_prefix}.{name}.weight",
+                input_size,
+                output_size,
+                linear_factory=linear_factory,
+                device=device,
+                dtype=dtype,
+            )
+
+        self.q_proj = projection(
+            "q_proj", hidden_size, num_heads * self.q_head_dim
         )
-        self.kv_a_proj_with_mqa = nn.Linear(
-            hidden_size, kv_lora_rank + qk_rope_head_dim, bias=False, **factory
+        self.kv_a_proj_with_mqa = projection(
+            "kv_a_proj_with_mqa",
+            hidden_size,
+            kv_lora_rank + qk_rope_head_dim,
         )
         self.kv_a_layernorm = RMSNorm(
             kv_lora_rank, eps=rms_norm_eps, device=device, dtype=dtype
         )
-        self.kv_b_proj = nn.Linear(
+        self.kv_b_proj = projection(
+            "kv_b_proj",
             kv_lora_rank,
             num_heads * (qk_nope_head_dim + v_head_dim),
-            bias=False,
-            **factory,
         )
-        self.o_proj = nn.Linear(
-            num_heads * v_head_dim, hidden_size, bias=False, **factory
+        self.o_proj = projection(
+            "o_proj", num_heads * v_head_dim, hidden_size
         )
 
     def _attention_mask(
