@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "evidenceType": "accuracy",
+  "profile": "default-int4",
+  "humanDocument": "RESULTS.md",
+  "runIdentity": {
+    "runId": "20260728T213950Z-35971f7c",
+    "producer": "engine/modal_accuracy.py",
+    "runtime": "vLLM 0.26.0",
+    "gpuUuid": "GPU-37947044-3026-cb43-c9fe-b12bb75ee75b"
+  },
+  "documentChecks": [
+    "Run 20260728T213950Z-35971f7c on one H200",
+    "same vLLM 0.26.0, on the same physical GPU"
+  ],
+  "hardware": {
+    "accuracy": {
+      "accelerator": "H200",
+      "acceleratorCount": 1,
+      "evidenceStatus": "MEASURED"
+    }
+  },
+  "conditions": "Run 20260728T213950Z-35971f7c, vLLM 0.26.0, same physical GPU, identical prompts, sampling, and served configs; only weight values differ",
+  "values": {
+    "perplexityBaseline": {
+      "value": 12.712,
+      "displayValue": "12.712",
+      "unit": "perplexity",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Teacher-forced perplexity, BF16",
+          "12.712"
+        ],
+        "displayValue": "12.712",
+        "decimalPlaces": 3
+      }
+    },
+    "perplexityCandidate": {
+      "value": 12.815,
+      "displayValue": "12.815",
+      "unit": "perplexity",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Teacher-forced perplexity, INT4 round trip",
+          "12.815"
+        ],
+        "displayValue": "12.815",
+        "decimalPlaces": 3
+      }
+    },
+    "perplexityIncreasePercent": {
+      "value": 0.81,
+      "displayValue": "+0.81%",
+      "unit": "%",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Perplexity increase",
+          "+0.81%"
+        ],
+        "displayValue": "+0.81%",
+        "decimalPlaces": 2
+      }
+    },
+    "top1AgreementPercent": {
+      "value": 85.16,
+      "displayValue": "85.16%",
+      "unit": "%",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Next-token top-1 agreement",
+          "85.2%"
+        ],
+        "displayValue": "85.2%",
+        "decimalPlaces": 1
+      }
+    },
+    "meanKlNats": {
+      "value": 0.0555,
+      "displayValue": "0.0555",
+      "unit": "nats",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Mean KL(BF16 || INT4), exact full vocabulary",
+          "0.0555 nats"
+        ],
+        "displayValue": "0.0555",
+        "decimalPlaces": 4
+      }
+    },
+    "greedyIdentityPercent": {
+      "value": 37.69,
+      "displayValue": "37.69%",
+      "unit": "%",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Greedy output identity",
+          "37.7%"
+        ],
+        "displayValue": "37.7%",
+        "decimalPlaces": 1
+      }
+    },
+    "routerSetAgreementPercent": {
+      "value": 34.30,
+      "displayValue": "34.30%",
+      "unit": "%",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Router set agreement",
+          "34.3%"
+        ],
+        "displayValue": "34.3%",
+        "decimalPlaces": 1
+      }
+    },
+    "verdict": {
+      "value": "FAIL",
+      "displayValue": "FAIL",
+      "unit": "verdict",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "Verdict: FAIL"
+        ]
+      }
+    }
+  }
+}

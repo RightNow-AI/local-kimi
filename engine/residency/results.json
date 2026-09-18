@@ -1,0 +1,228 @@
+{
+  "schemaVersion": 1,
+  "evidenceType": "residency",
+  "humanDocument": "REPORT.md",
+  "runIdentity": {
+    "producer": "engine/modal_residency.py",
+    "modelRevision": "e1df551a447157d4658b573f9a695d57658590e9",
+    "cachePolicy": "compressed_latent"
+  },
+  "documentChecks": [
+    "engine/modal_residency.py ran on an NVIDIA H100 80GB HBM3",
+    "model revision e1df551a447157d4658b573f9a695d57658590e9"
+  ],
+  "hardware": {
+    "validation": {
+      "accelerator": "NVIDIA H100 80GB HBM3",
+      "acceleratorCount": 1,
+      "evidenceStatus": "MEASURED"
+    }
+  },
+  "conditions": "Compressed-latent cache, measured selective INT4 weights, source-derived state model, and explicit projected operational reserve",
+  "values": {
+    "point1PredictedStateBytes": {
+      "value": 308150272,
+      "displayValue": "308,150,272",
+      "unit": "bytes",
+      "evidenceStatus": "SOURCE_DERIVED",
+      "markdown": {
+        "contains": [
+          "1 x 32,768",
+          "308,150,272"
+        ],
+        "displayValue": "308,150,272"
+      }
+    },
+    "point1MeasuredAllocatedBytes": {
+      "value": 308150272,
+      "displayValue": "308,150,272",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "1 x 32,768",
+          "308,150,272"
+        ],
+        "displayValue": "308,150,272"
+      }
+    },
+    "point1AllocatedMinusPredictedBytes": {
+      "value": 0,
+      "displayValue": "0",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "1 x 32,768",
+          "0",
+          "MATCH"
+        ],
+        "displayValue": "0"
+      }
+    },
+    "point2PredictedStateBytes": {
+      "value": 439877632,
+      "displayValue": "439,877,632",
+      "unit": "bytes",
+      "evidenceStatus": "SOURCE_DERIVED",
+      "markdown": {
+        "contains": [
+          "2 x 32,768",
+          "439,877,632"
+        ],
+        "displayValue": "439,877,632"
+      }
+    },
+    "point2MeasuredAllocatedBytes": {
+      "value": 439877632,
+      "displayValue": "439,877,632",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "2 x 32,768",
+          "439,877,632"
+        ],
+        "displayValue": "439,877,632"
+      }
+    },
+    "point2AllocatedMinusPredictedBytes": {
+      "value": 0,
+      "displayValue": "0",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "2 x 32,768",
+          "0",
+          "MATCH"
+        ],
+        "displayValue": "0"
+      }
+    },
+    "point3PredictedStateBytes": {
+      "value": 966787072,
+      "displayValue": "966,787,072",
+      "unit": "bytes",
+      "evidenceStatus": "SOURCE_DERIVED",
+      "markdown": {
+        "contains": [
+          "8 x 32,768",
+          "966,787,072"
+        ],
+        "displayValue": "966,787,072"
+      }
+    },
+    "point3MeasuredAllocatedBytes": {
+      "value": 966787072,
+      "displayValue": "966,787,072",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "8 x 32,768",
+          "966,787,072"
+        ],
+        "displayValue": "966,787,072"
+      }
+    },
+    "point3AllocatedMinusPredictedBytes": {
+      "value": 0,
+      "displayValue": "0",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "8 x 32,768",
+          "0",
+          "MATCH"
+        ],
+        "displayValue": "0"
+      }
+    },
+    "envelopeCapacityGiB": {
+      "value": 32,
+      "displayValue": "32",
+      "unit": "GiB",
+      "evidenceStatus": "PROJECTED",
+      "markdown": {
+        "contains": [
+          "32 GiB card supports"
+        ],
+        "displayValue": "32"
+      }
+    },
+    "envelopeMaxNumSeqs": {
+      "value": 7,
+      "displayValue": "7",
+      "unit": "max_num_seqs",
+      "evidenceStatus": "PROJECTED",
+      "markdown": {
+        "contains": [
+          "max_num_seqs=7"
+        ],
+        "displayValue": "7"
+      }
+    },
+    "envelopeMaxModelLen": {
+      "value": 32768,
+      "displayValue": "32,768",
+      "unit": "tokens",
+      "evidenceStatus": "PROJECTED",
+      "markdown": {
+        "contains": [
+          "max_model_len=32,768"
+        ],
+        "displayValue": "32,768"
+      }
+    },
+    "envelopeWeightBytes": {
+      "value": 28803304448,
+      "displayValue": "28,803,304,448",
+      "unit": "bytes",
+      "evidenceStatus": "MEASURED",
+      "markdown": {
+        "contains": [
+          "MEASURED_INT4_SELECTIVE_WEIGHTS = 28,803,304,448 bytes"
+        ],
+        "displayValue": "28,803,304,448"
+      }
+    },
+    "operationalReserveGiB": {
+      "value": 3,
+      "displayValue": "3",
+      "unit": "GiB",
+      "evidenceStatus": "PROJECTED",
+      "markdown": {
+        "contains": [
+          "PROJECTED 3 GiB operational reserve"
+        ],
+        "displayValue": "3"
+      }
+    },
+    "envelopeTotalBytes": {
+      "value": 34181581824,
+      "displayValue": "34,181,581,824",
+      "unit": "bytes",
+      "evidenceStatus": "PROJECTED",
+      "markdown": {
+        "contains": [
+          "The exact total is 34,181,581,824 bytes"
+        ],
+        "displayValue": "34,181,581,824"
+      }
+    },
+    "envelopeSlackBytes": {
+      "value": 178156544,
+      "displayValue": "178,156,544",
+      "unit": "bytes",
+      "evidenceStatus": "PROJECTED",
+      "markdown": {
+        "contains": [
+          "leaving 178,156,544 bytes of arithmetic slack"
+        ],
+        "displayValue": "178,156,544"
+      }
+    }
+  }
+}
