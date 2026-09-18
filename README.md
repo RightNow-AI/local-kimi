@@ -1,47 +1,40 @@
 # local-kimi
 
-`local-kimi` contains two related pieces of work:
+`local-kimi` is primarily `k3/`, a protocol adapter between a local Kimi endpoint
+and clients that speak Anthropic Messages, OpenAI Chat Completions, or OpenAI
+Responses. It detects the client dialect per request, translates tools and
+streams, and carries reasoning through client round trips when the backend
+provides a separate or recognised inline reasoning channel.
 
-- `k3/` is a local protocol adapter for sending Anthropic Messages, OpenAI Chat
-  Completions, and OpenAI Responses requests to a Kimi K3 endpoint.
-- `engine/` and `research/` contain reference implementations, measurement
-  tools, and models used to investigate local Kimi serving.
+Use it when llama.cpp already serves Kimi but Claude Code, Codex, or an OpenAI
+SDK client needs its own wire protocol. With llama.cpp listening on port 8000,
+the adapter command is:
 
-The proxy is alpha software. The engine work is research code, not a complete
-or production-qualified Kimi K3 serving engine.
+```bash
+uv run k3 serve --upstream http://127.0.0.1:8000/v1 --model kimi-linear --reasoning-field inline
+```
 
-## Read this before you use the engine
+Start with the [five-minute quickstart](docs/QUICKSTART.md). Worked client setup
+is in [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md),
+[docs/CODEX.md](docs/CODEX.md), and
+[docs/OPENAI-SDK.md](docs/OPENAI-SDK.md).
 
-**If you want to run Kimi-Linear-48B on a consumer GPU today, use llama.cpp, not
-this.** A GGUF conversion already exists at
+## Backend position
+
+For local Kimi-Linear-48B inference, use llama.cpp as the backend. A GGUF exists
+at
 [AaryanK/Kimi-Linear-48B-A3B-Instruct-GGUF](https://huggingface.co/AaryanK/Kimi-Linear-48B-A3B-Instruct-GGUF)
-with Q4_K_S at 27.9 GB and Q2_K at 18 GB, and
+with Q4_K_S at 27.9 GB, and
 [llama.cpp PR 17592](https://github.com/ggml-org/llama.cpp/pull/17592) reports
-roughly 32 tokens per second generation and 450 prompt processing on an RTX
-3090. Our engine currently generates at 0.67 to 3.39 tokens per second, measured
-on an L40S under a 32 GiB cap. That is between 10 and 50 times slower.
+roughly 32 tokens per second on an RTX 3090. The engine in this repository is
+research code and measures 0.67 to 3.39 tokens per second. It is not the
+recommended local backend.
 
-We found this out after building the engine, not before, and the honest thing to
-do is put it at the top rather than let you discover it yourself.
-
-What this repository is actually good for:
-
-- **`k3/`, the protocol adapter.** This is the genuinely distinct piece. It
-  serves one Kimi endpoint to Anthropic Messages, OpenAI Chat Completions and
-  OpenAI Responses clients, auto-detecting the dialect per request, and it
-  preserves reasoning content byte-exactly across turns so a thinking block
-  survives a round trip. llama.cpp does not do this and is not trying to.
-- **The verification tooling.** A quantization verifier whose three negative
-  controls must FAIL on a wrong decoder, a residency model that predicted real
-  GPU allocation to the byte, and a paired accuracy harness that isolates
-  quantization damage from engine differences. These are reusable against other
-  models.
-- **The measurements and the negative results**, which are recorded whether or
-  not they flattered the work.
-
-If you want a fast local Kimi, use llama.cpp. If you want to serve Kimi to a
-coding agent that speaks a different wire format, or you want to check a
-quantization honestly, there is something here.
+The distinct component here is `k3/`. llama.cpp provides a raw OpenAI-compatible
+endpoint. `k3` adds Anthropic Messages and OpenAI Responses surfaces alongside
+Chat Completions, per-request dialect detection, client-shaped streaming and
+errors, tool-call translation, and a reasoning ledger. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Current evidence boundary
 
@@ -111,11 +104,13 @@ or a GPU:
 uv run k3 serve --mock
 ```
 
-To use a real engine, point the proxy at an OpenAI-compatible Kimi K3 endpoint:
+To use a real backend, point the proxy at an OpenAI-compatible Kimi endpoint:
 
 ```bash
-uv run k3 serve --upstream http://127.0.0.1:8000/v1 --model k3
+uv run k3 serve --upstream http://127.0.0.1:8000/v1 --model kimi-linear --reasoning-field inline
 ```
+
+The complete llama.cpp setup is in [docs/QUICKSTART.md](docs/QUICKSTART.md).
 
 The proxy binds to `127.0.0.1` by default. If it is bound to a non-loopback
 address, configure `--api-key` and review the exposure settings before use.
