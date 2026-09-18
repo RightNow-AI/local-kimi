@@ -1,17 +1,17 @@
 """Single-invocation Modal entrypoint for matched Kimi-Linear measurement.
 
-The candidate command must start the repository's real OpenAI-compatible
-inference server. This package does not substitute the partial correctness
-adapter from ``engine.bench.candidate`` and has no reference fallback.
+The default candidate command starts the repository's real OpenAI-compatible
+KLinear inference server on the selective INT4 artifact. This package does not
+substitute the partial correctness adapter from ``engine.bench.candidate`` and
+has no reference fallback.
 
-The command is a JSON string array with required placeholders. Example shape:
+The command seam remains a JSON string array with required placeholders. Its
+default shape is:
 
     modal run engine/measure/modal_measure.py \
-      --candidate-runtime-name local-kimi-engine \
-      --candidate-quantization-format "INT4 weight-only" \
-      --candidate-weights-dir optimized/kimi-linear \
-      --candidate-command-json '["python","-m","REAL_SERVER_MODULE",...]' \
-      --candidate-version-command-json '["python","-m","REAL_SERVER_MODULE","--version"]'
+      --candidate-runtime-name engine.klinear \
+      --candidate-quantization-format "selective W4A16 INT4" \
+      --candidate-weights-dir Kimi-Linear-48B-A3B-Instruct-W4A16
 
 The real command must include ``{model_id}``, ``{model_path}``,
 ``{weights_path}``, ``{port}``, ``{served_model_name}``, ``{max_model_len}``,
@@ -29,6 +29,14 @@ from typing import Any
 
 import modal
 
+from engine.measure.candidate_server import (
+    DEFAULT_COMMAND_TEMPLATE,
+    DEFAULT_INT4_WEIGHTS_PATH,
+    DEFAULT_QUANTIZATION_FORMAT,
+    DEFAULT_RUNTIME_NAME,
+    DEFAULT_VERSION_COMMAND,
+    candidate_runtime_spec,
+)
 from engine.measure.harness import RuntimeSpec, load_download_manifest, run_both_sides
 from engine.measure.prompts import build_prompt_set
 from engine.measure.record import MIN_REPETITIONS, validate_concurrency_levels
@@ -54,6 +62,12 @@ IMAGE_REQUIREMENTS = (
     "safetensors>=0.4",
     "fla-core",
     "einops>=0.8",
+    "fastapi>=0.115",
+    "ninja>=1.11",
+    "pydantic>=2.7",
+    "tiktoken>=0.9",
+    "blobfile>=3.0",
+    "uvicorn[standard]>=0.30",
 )
 
 # A CUDA devel base, not debian_slim. On debian_slim this model loads all 20
@@ -80,16 +94,27 @@ IMAGE = (
 )
 
 KIMI_LINEAR_WEIGHTS = modal.Volume.from_name(
-    "kimi-linear-weights", create_if_missing=True
+    "kimi-linear-weights", create_if_missing=False
 )
-VOL = "/kimi-linear"
-HF_CACHE = f"{VOL}/huggingface"
-DOWNLOAD_MANIFEST_PATH = f"{VOL}/bench/kimi-linear-48b-a3b/download.json"
-MEASUREMENT_DIR = f"{VOL}/measurements"
+KIMI_LINEAR_QUANTIZED = modal.Volume.from_name(
+    "kimi-linear-quantized", create_if_missing=False
+)
+WEIGHTS_MOUNT = "/weights"
+QUANTIZED_MOUNT = "/quantized"
+BF16_DIRECTORY = f"{WEIGHTS_MOUNT}/Kimi-Linear-48B-A3B-Instruct"
+INT4_DIRECTORY = f"{QUANTIZED_MOUNT}/Kimi-Linear-48B-A3B-Instruct-W4A16"
+HF_CACHE = f"{WEIGHTS_MOUNT}/huggingface"
+DOWNLOAD_MANIFEST_PATH = f"{WEIGHTS_MOUNT}/bench/kimi-linear-48b-a3b/download.json"
+MEASUREMENT_DIR = f"{WEIGHTS_MOUNT}/measurements"
 MODEL_ID = "moonshotai/Kimi-Linear-48B-A3B-Instruct"
 DEFAULT_GPU = "H200"
-ALLOWED_SINGLE_GPUS = {"H200", "B200"}
+ALLOWED_SINGLE_GPUS = {"H200"}
 PORT = 8000
+
+# The BF16 artifact contains 91.51 GiB of tensors, so H100 80GB cannot run the
+# baseline. Both sides must use this same H200 or the comparison is invalid.
+if INT4_DIRECTORY != DEFAULT_INT4_WEIGHTS_PATH:
+    raise RuntimeError("candidate server and Modal INT4 mount paths disagree")
 
 
 def _json_string_array(raw: str, field: str) -> list[str]:
@@ -125,6 +150,8 @@ def _package_versions() -> dict[str, str]:
         "httpx",
         "nvidia-ml-py",
         "safetensors",
+        "tiktoken",
+        "blobfile",
     )
     versions = {}
     for package in packages:
@@ -146,7 +173,10 @@ def _atomic_json(path: str, value: dict[str, Any]) -> None:
 @APP.function(
     image=IMAGE,
     gpu=DEFAULT_GPU,
-    volumes={VOL: KIMI_LINEAR_WEIGHTS},
+    volumes={
+        WEIGHTS_MOUNT: KIMI_LINEAR_WEIGHTS,
+        QUANTIZED_MOUNT: KIMI_LINEAR_QUANTIZED,
+    },
     cpu=16.0,
     memory=65536,
     timeout=60 * 60 * 12,
@@ -169,7 +199,7 @@ def measure_both(
     request_timeout_seconds: float,
     requested_gpu: str,
 ) -> dict[str, Any]:
-    """Measure tuned vLLM and the real candidate sequentially on this GPU."""
+    """Measure configured vLLM and engine.klinear sequentially on one H200."""
 
     from transformers import AutoTokenizer
 
@@ -194,25 +224,31 @@ def measure_both(
 
     concurrency_levels = validate_concurrency_levels(concurrency_levels)
     KIMI_LINEAR_WEIGHTS.reload()
+    KIMI_LINEAR_QUANTIZED.reload()
     download = load_download_manifest(
         DOWNLOAD_MANIFEST_PATH,
         model_id=MODEL_ID,
         requested_revision=revision,
     )
-    snapshot_path = download["snapshot_path"]
     resolved_revision = download["resolved_revision"]
+    if not Path(BF16_DIRECTORY).is_dir():
+        raise FileNotFoundError(f"BF16 artifact is missing: {BF16_DIRECTORY}")
     candidate_weights_path = (
         candidate_weights_dir
         if os.path.isabs(candidate_weights_dir)
-        else f"{VOL}/{candidate_weights_dir.strip('/')}"
+        else f"{QUANTIZED_MOUNT}/{candidate_weights_dir.strip('/')}"
     )
-    if Path(candidate_weights_path).resolve() == Path(snapshot_path).resolve():
+    if not Path(candidate_weights_path).is_dir():
+        raise FileNotFoundError(
+            f"candidate INT4 artifact is missing: {candidate_weights_path}"
+        )
+    if Path(candidate_weights_path).resolve() == Path(BF16_DIRECTORY).resolve():
         raise ValueError("candidate weights must be a distinct quantized artifact")
     max_num_seqs = max(concurrency_levels)
     served_model_name = MODEL_ID
     values = {
         "model_id": MODEL_ID,
-        "model_path": snapshot_path,
+        "model_path": BF16_DIRECTORY,
         "weights_path": candidate_weights_path,
         "resolved_revision": resolved_revision,
         "port": PORT,
@@ -249,7 +285,7 @@ def measure_both(
     )
 
     tokenizer = AutoTokenizer.from_pretrained(
-        snapshot_path,
+        BF16_DIRECTORY,
         trust_remote_code=True,
         local_files_only=True,
         cache_dir=HF_CACHE,
@@ -265,7 +301,7 @@ def measure_both(
     baseline_command = [
         "vllm",
         "serve",
-        snapshot_path,
+        BF16_DIRECTORY,
         "--host",
         "127.0.0.1",
         "--port",
@@ -291,7 +327,7 @@ def measure_both(
         quantization_format="BF16",
         command=baseline_command,
         version_command=python_package_version_command("vllm"),
-        weights_path=snapshot_path,
+        weights_path=BF16_DIRECTORY,
         compute_weights_digest=False,
         model_id=MODEL_ID,
         requested_revision=revision,
@@ -300,20 +336,22 @@ def measure_both(
         tensor_parallel_size=1,
         max_model_len=max_model_len,
         port=PORT,
+        disclosures=(
+            "vLLM 0.26.0 reports no tuned fused-MoE configuration for E=256 "
+            "and N=1024 on H200, so it uses a default configuration. This is "
+            "not a tuned fused-MoE baseline.",
+        ),
     )
-    candidate = RuntimeSpec(
-        side="candidate",
-        name=candidate_runtime_name,
+    candidate = candidate_runtime_spec(
+        runtime_name=candidate_runtime_name,
         quantization_format=candidate_quantization_format,
         command=candidate_command,
         version_command=candidate_version_command,
         weights_path=candidate_weights_path,
-        compute_weights_digest=True,
         model_id=MODEL_ID,
         requested_revision=revision,
         resolved_revision=resolved_revision,
         served_model_name=served_model_name,
-        tensor_parallel_size=1,
         max_model_len=max_model_len,
         port=PORT,
     )
@@ -344,11 +382,11 @@ def measure_both(
 def main(
     revision: str = "main",
     gpu: str = DEFAULT_GPU,
-    candidate_runtime_name: str = "",
-    candidate_quantization_format: str = "INT4 weight-only",
-    candidate_weights_dir: str = "",
-    candidate_command_json: str = "",
-    candidate_version_command_json: str = "",
+    candidate_runtime_name: str = DEFAULT_RUNTIME_NAME,
+    candidate_quantization_format: str = DEFAULT_QUANTIZATION_FORMAT,
+    candidate_weights_dir: str = DEFAULT_INT4_WEIGHTS_PATH,
+    candidate_command_json: str = json.dumps(DEFAULT_COMMAND_TEMPLATE),
+    candidate_version_command_json: str = json.dumps(DEFAULT_VERSION_COMMAND),
     concurrencies: str = "1,4,16,64",
     repetitions: int = MIN_REPETITIONS,
     warmup_requests: int = 4,
@@ -364,7 +402,7 @@ def main(
     if gpu not in ALLOWED_SINGLE_GPUS:
         raise ValueError(f"gpu must be one of {sorted(ALLOWED_SINGLE_GPUS)}")
     if not candidate_weights_dir.strip():
-        raise ValueError("--candidate-weights-dir is required")
+        raise ValueError("candidate_weights_dir must not be empty")
     command_template = _json_string_array(
         candidate_command_json,
         "candidate_command_json",

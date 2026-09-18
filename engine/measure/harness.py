@@ -43,6 +43,7 @@ class RuntimeSpec:
     tensor_parallel_size: int
     max_model_len: int
     port: int
+    disclosures: tuple[str, ...] = ()
 
 
 def load_download_manifest(
@@ -102,7 +103,16 @@ def _measure_side(
     startup_timeout_seconds: float,
     request_timeout_seconds: float,
 ) -> dict[str, Any]:
-    partial: dict[str, Any] = {"side": spec.side}
+    partial: dict[str, Any] = {
+        "side": spec.side,
+        "runtime": {
+            "name": spec.name,
+            "quantization_format": spec.quantization_format,
+            "server_command": spec.command,
+            "disclosures": list(spec.disclosures),
+        },
+        "model": {"weights_path": str(Path(spec.weights_path).resolve())},
+    }
     server: ServerProcess | None = None
     probe: GpuMemoryProbe | None = None
     memory_samples: list[dict[str, Any]] = []
@@ -177,6 +187,7 @@ def _measure_side(
                 "served_model_name": spec.served_model_name,
                 "server_command": spec.command,
                 "server_flags": spec.command[1:],
+                "disclosures": list(spec.disclosures),
             },
             "gpu": dict(gpu),
             "memory": {
@@ -309,6 +320,12 @@ def run_both_sides(
             "percentile_method": "nearest-rank",
             "warmups_are_discarded": True,
             "raw_request_samples_retained": True,
+            "baseline_tuning_disclosure": (
+                "vLLM 0.26.0 reports that H200 has no tuned fused-MoE "
+                "configuration for E=256 and N=1024, so it uses a default "
+                "configuration. This record does not describe that fused-MoE "
+                "path as tuned."
+            ),
         },
         "prompt_set": prompt_set,
         "concurrency_levels": list(levels),
