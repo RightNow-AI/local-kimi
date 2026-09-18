@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -12,6 +13,8 @@ permissions:
   contents: read
 
 env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
   UV_NO_PROGRESS: "1"
 
 jobs:
@@ -22,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-14, windows-2022]
         python: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
@@ -35,20 +38,22 @@ jobs:
           version: "0.11.33"
           python-version: ${{ matrix.python }}
           enable-cache: true
-          cache-suffix: py${{ matrix.python }}
+          cache-suffix: py${{ matrix.python }}-${{ matrix.os }}
           cache-dependency-glob: |
             **/pyproject.toml
             **/uv.lock
 
-      - name: Install project and development dependencies
-        run: uv sync --python ${{ matrix.python }}
+      - name: Install locked project and development dependencies
+        run: uv sync --frozen --python ${{ matrix.python }}
 
       - name: Run complete offline suite
-        run: uv run --no-sync python -m pytest
+        run: >-
+          uv run --no-sync python -m pytest
+          -m "not gpu and not network and not weights"
 
-  lint:
-    name: lint, format, and package
-    runs-on: ubuntu-latest
+  lint-and-package:
+    name: lint and package
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -61,22 +66,16 @@ jobs:
           version: "0.11.33"
           python-version: "3.13"
           enable-cache: true
-          cache-suffix: lint
+          cache-suffix: lint-package
           cache-dependency-glob: |
             **/pyproject.toml
             **/uv.lock
 
-      - name: Install project and development dependencies
-        run: uv sync --python 3.13
+      - name: Install locked project and development dependencies
+        run: uv sync --frozen --python 3.13
 
-      - name: Lint
+      - name: Run Ruff
         run: uv run --no-sync ruff check .
-
-      # Existing files are intentionally not rewritten in this lane. Keep the
-      # report visible while lint and the package build remain blocking gates.
-      - name: Report formatting debt
-        continue-on-error: true
-        run: uv run --no-sync ruff format --check .
 
       - name: Build distributions
         run: uv build
