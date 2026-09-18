@@ -225,7 +225,14 @@ class KDAAttention(nn.Module):
         )
         output = self.o_norm(output, output_gate)
         output = self.o_proj(output.reshape(batch, sequence, self.projection_size))
-        final_state = KDALayerState(q_state, k_state, v_state, recurrent)
+        if state is not None and state.is_static:
+            state.q_conv.copy_(q_state)
+            state.k_conv.copy_(k_state)
+            state.v_conv.copy_(v_state)
+            state.recurrent.copy_(recurrent)
+            final_state = state
+        else:
+            final_state = KDALayerState(q_state, k_state, v_state, recurrent)
         if return_state:
             return output, final_state
         return output
@@ -327,6 +334,36 @@ class MLAAttention(nn.Module):
         additive.masked_fill_(~allowed, torch.finfo(torch.float32).min)
         return additive
 
+    def _static_attention_mask(
+        self,
+        attention_mask: torch.Tensor | None,
+        batch: int,
+        key_length: int,
+        position: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        key_positions = torch.arange(key_length, device=device)
+        allowed = key_positions.view(1, 1, 1, key_length) <= position.view(
+            1, 1, 1, 1
+        )
+        if attention_mask is not None:
+            if attention_mask.ndim != 2 or tuple(attention_mask.shape) != (
+                batch,
+                key_length,
+            ):
+                raise ValueError("static MLA padding mask must cover cache capacity")
+            allowed = allowed & attention_mask[:, None, None, :].bool()
+        additive = torch.zeros(
+            batch,
+            1,
+            1,
+            key_length,
+            dtype=torch.float32,
+            device=device,
+        )
+        additive.masked_fill_(~allowed, torch.finfo(torch.float32).min)
+        return additive
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -348,10 +385,36 @@ class MLAAttention(nn.Module):
         current_latent, current_rotary = torch.split(
             current, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
+        current_key_pass = self.kv_b_proj(
+            self.kv_a_layernorm(current_latent)
+        ).view(
+            batch,
+            sequence,
+            self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+        current_key_pass = current_key_pass.transpose(1, 2)
+        current_key_pass, current_value = torch.split(
+            current_key_pass,
+            [self.qk_nope_head_dim, self.v_head_dim],
+            dim=-1,
+        )
+
         if state is None:
             latent = current_latent
             rotary = current_rotary
+            key_pass = current_key_pass
+            value = current_value
             past_length = 0
+            mask = self._attention_mask(
+                attention_mask,
+                batch,
+                sequence,
+                sequence,
+                past_length,
+                hidden_states.device,
+            )
+            final_state = MLALayerState(latent, rotary, key_pass, value)
         else:
             if state.batch_size != batch:
                 raise ValueError("MLA cache batch size does not match the current input")
@@ -359,34 +422,66 @@ class MLAAttention(nn.Module):
                 raise ValueError("MLA cache has the wrong latent rank")
             if state.rotary_key.shape[-1] != self.qk_rope_head_dim:
                 raise ValueError("MLA cache has the wrong rotary width")
-            past_length = state.sequence_length
-            latent = torch.cat((state.compressed_kv, current_latent), dim=1)
-            rotary = torch.cat((state.rotary_key, current_rotary), dim=1)
+            cached_key_pass = state.key_pass
+            cached_value = state.value
+            if cached_key_pass is None or cached_value is None:
+                rebuilt = self.kv_b_proj(
+                    self.kv_a_layernorm(state.compressed_kv)
+                ).view(
+                    batch,
+                    state.compressed_kv.shape[1],
+                    self.num_heads,
+                    self.qk_nope_head_dim + self.v_head_dim,
+                )
+                rebuilt = rebuilt.transpose(1, 2)
+                cached_key_pass, cached_value = torch.split(
+                    rebuilt,
+                    [self.qk_nope_head_dim, self.v_head_dim],
+                    dim=-1,
+                )
+            if state.is_static:
+                if sequence != 1:
+                    raise ValueError("fixed-capacity MLA state accepts one decode token")
+                position = state.position.reshape(1)
+                state.compressed_kv.index_copy_(1, position, current_latent)
+                state.rotary_key.index_copy_(1, position, current_rotary)
+                state.key_pass.index_copy_(2, position, current_key_pass)
+                state.value.index_copy_(2, position, current_value)
+                latent = state.compressed_kv
+                rotary = state.rotary_key
+                key_pass = state.key_pass
+                value = state.value
+                mask = self._static_attention_mask(
+                    attention_mask,
+                    batch,
+                    state.capacity,
+                    state.position,
+                    hidden_states.device,
+                )
+                state.position.add_(1)
+                final_state = state
+            else:
+                past_length = state.sequence_length
+                latent = torch.cat((state.compressed_kv, current_latent), dim=1)
+                rotary = torch.cat((state.rotary_key, current_rotary), dim=1)
+                key_pass = torch.cat((cached_key_pass, current_key_pass), dim=2)
+                value = torch.cat((cached_value, current_value), dim=2)
+                mask = self._attention_mask(
+                    attention_mask,
+                    batch,
+                    sequence,
+                    latent.shape[1],
+                    past_length,
+                    hidden_states.device,
+                )
+                final_state = MLALayerState(latent, rotary, key_pass, value)
 
-        key_pass = self.kv_b_proj(self.kv_a_layernorm(latent)).view(
-            batch,
-            latent.shape[1],
-            self.num_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-        key_pass = key_pass.transpose(1, 2)
-        key_pass, value = torch.split(
-            key_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-        )
         key_rotary = rotary.view(
-            batch, 1, latent.shape[1], self.qk_rope_head_dim
+            batch, 1, rotary.shape[1], self.qk_rope_head_dim
         ).expand(*key_pass.shape[:-1], -1)
 
         query = torch.cat((query_pass, query_rotary), dim=-1)
         key = torch.cat((key_pass, key_rotary), dim=-1)
-        mask = self._attention_mask(
-            attention_mask,
-            batch,
-            sequence,
-            latent.shape[1],
-            past_length,
-            hidden_states.device,
-        )
         scores = torch.einsum("bhqd,bhkd->bhqk", query, key) * self.scaling
         probabilities = (scores.float() + mask).softmax(dim=-1).to(query.dtype)
         output = torch.einsum("bhqk,bhkd->bhqd", probabilities, value)
@@ -394,7 +489,6 @@ class MLAAttention(nn.Module):
             batch, sequence, self.num_heads * self.v_head_dim
         )
         output = self.o_proj(output)
-        final_state = MLALayerState(latent, rotary)
         if return_state:
             return output, final_state
         return output

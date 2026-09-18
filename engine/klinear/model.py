@@ -159,6 +159,8 @@ class KLinearModel(nn.Module):
         model.load_checkpoint_weights(store, device=device, dtype=dtype)
         model._weight_store = store
         model._expert_provider = expert_provider
+        if store.checkpoint_kind is CheckpointKind.W4A16:
+            model.prepare_grouped_decode_weights()
         if (
             store.checkpoint_kind is CheckpointKind.W4A16
             and model.resident_weight_bytes != store.tensor_storage_bytes
@@ -223,6 +225,12 @@ class KLinearModel(nn.Module):
     def empty_state(self) -> KLinearDecodeState:
         return KLinearDecodeState.empty(self.config.num_hidden_layers)
 
+    def prepare_grouped_decode_weights(self) -> None:
+        """Move resident W4A16 experts into layer-contiguous grouped banks."""
+        for layer in self.layers:
+            if layer.block_sparse_moe is not None:
+                layer.block_sparse_moe.prepare_grouped_w4a16()
+
     def _attention_masks(
         self,
         attention_mask: torch.Tensor | None,
@@ -230,6 +238,31 @@ class KLinearModel(nn.Module):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         batch, sequence, _ = hidden_states.shape
+        if state.is_static:
+            if sequence != 1:
+                raise ValueError("fixed-capacity decode state accepts one token")
+            current = torch.ones(
+                batch,
+                1,
+                device=hidden_states.device,
+                dtype=(
+                    state.attention_mask.dtype
+                    if state.attention_mask is not None
+                    else torch.long
+                ),
+            )
+            if attention_mask is not None:
+                if tuple(attention_mask.shape) != (batch, 1):
+                    raise ValueError("static decode attention_mask must cover one token")
+                current = attention_mask.to(device=hidden_states.device)
+            if state.attention_mask is None:
+                return None, None, None
+            state.attention_mask.index_copy_(
+                1,
+                state.position.reshape(1),
+                current.to(dtype=state.attention_mask.dtype),
+            )
+            return current, state.attention_mask, state.attention_mask
         if attention_mask is None:
             if state.attention_mask is None:
                 return None, None, None
@@ -301,6 +334,7 @@ class KLinearModel(nn.Module):
         for layer, layer_state in zip(self.layers, state.layer_states, strict=True):
             if (
                 isinstance(layer_state, MLALayerState)
+                and not layer_state.is_static
                 and layer_state.sequence_length != state.tokens_seen
             ):
                 raise ValueError(
