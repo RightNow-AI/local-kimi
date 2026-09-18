@@ -1,10 +1,12 @@
 """Build and verify a real selective W4A16 Kimi-Linear checkpoint on Modal.
 
 The source checkpoint is read only from the existing ``kimi-linear-weights``
-volume. The output is written to ``kimi-linear-quantized`` as safetensors plus
-an index and a per-tensor evidence manifest.
+volume. The output is written to a profile-specific directory on
+``kimi-linear-quantized`` as safetensors plus an index and a per-tensor
+evidence manifest. The default profile keeps the existing output path.
 
     modal run engine/modal_quantize_klinear.py
+    modal run engine/modal_quantize_klinear.py --profile shared-experts-bf16
 """
 
 from __future__ import annotations
@@ -22,7 +24,6 @@ SOURCE_MOUNT = "/source"
 OUTPUT_MOUNT = "/output"
 MODEL_NAME = "Kimi-Linear-48B-A3B-Instruct"
 SOURCE_DIR = f"{SOURCE_MOUNT}/{MODEL_NAME}"
-OUTPUT_DIR = f"{OUTPUT_MOUNT}/{MODEL_NAME}-W4A16"
 MANIFEST_NAME = "quantization-manifest.json"
 
 # numpy is explicit. torch does not pull it, and without it torch degrades
@@ -43,7 +44,7 @@ IMAGE = (
     timeout=60 * 60 * 24,
     volumes={SOURCE_MOUNT: SOURCE_VOLUME, OUTPUT_MOUNT: OUTPUT_VOLUME},
 )
-def quantize_checkpoint(overwrite: bool = False) -> dict:
+def quantize_checkpoint(overwrite: bool = False, profile: str = "default") -> dict:
     import gc
     import math
     import os
@@ -58,9 +59,11 @@ def quantize_checkpoint(overwrite: bool = False) -> dict:
     from safetensors.torch import save_file
 
     from engine.quant.klinear_plan import (
+        DEFAULT_PROFILE_NAME,
         RESULTS_PROJECTION_BYTES,
         TensorMetadata,
         build_klinear_quantization_plan,
+        get_klinear_quantization_profile,
     )
     from engine.quant.verify import (
         VerificationError,
@@ -71,6 +74,12 @@ def quantize_checkpoint(overwrite: bool = False) -> dict:
         wrong_scale_dequantise,
     )
     from engine.quant.w4a16 import GROUP_SIZE, W4A16Tensor, dequantise, quantise
+
+    selected_profile = get_klinear_quantization_profile(profile)
+    output_directory_name = f"{MODEL_NAME}-W4A16"
+    if selected_profile.name != DEFAULT_PROFILE_NAME:
+        output_directory_name = f"{output_directory_name}-{selected_profile.name}"
+    output_dir = f"{OUTPUT_MOUNT}/{output_directory_name}"
 
     if not os.path.isdir(SOURCE_DIR):
         raise FileNotFoundError(
@@ -202,7 +211,19 @@ def quantize_checkpoint(overwrite: bool = False) -> dict:
                 )
             )
 
-    plan = build_klinear_quantization_plan(tensor_metadata)
+    plan = build_klinear_quantization_plan(
+        tensor_metadata,
+        profile=selected_profile.name,
+    )
+    default_plan = (
+        plan
+        if selected_profile.name == DEFAULT_PROFILE_NAME
+        else build_klinear_quantization_plan(
+            tensor_metadata,
+            profile=DEFAULT_PROFILE_NAME,
+        )
+    )
+    profile_delta_bytes = plan.planned_bytes - default_plan.planned_bytes
     decisions = {decision.name: decision for decision in plan.tensors}
     if plan.quantized_tensor_count == 0:
         raise ValueError("the real checkpoint plan selected no tensors for W4A16")
@@ -344,11 +365,11 @@ def quantize_checkpoint(overwrite: bool = False) -> dict:
 
     policy_coverage = validate_policy_coverage()
 
-    staging_dir = f"{OUTPUT_DIR}.staging-{uuid.uuid4().hex}"
-    output_exists = os.path.exists(OUTPUT_DIR)
+    staging_dir = f"{output_dir}.staging-{uuid.uuid4().hex}"
+    output_exists = os.path.exists(output_dir)
     if output_exists and not overwrite:
         raise FileExistsError(
-            f"{OUTPUT_DIR} already exists; pass overwrite=True to replace it"
+            f"{output_dir} already exists; pass overwrite=True to replace it"
         )
     os.makedirs(staging_dir, exist_ok=False)
 
@@ -575,6 +596,7 @@ def quantize_checkpoint(overwrite: bool = False) -> dict:
                 metadata={
                     "format": "pt",
                     "runinfra_quantization": "W4A16",
+                    "runinfra_quantization_profile": plan.profile.name,
                     "runinfra_group_size": str(GROUP_SIZE),
                 },
             )
@@ -620,6 +642,7 @@ def quantize_checkpoint(overwrite: bool = False) -> dict:
         "metadata": {
             "total_size": actual_tensor_storage_bytes,
             "quantization": "W4A16",
+            "quantization_profile": plan.profile.name,
             "group_size": GROUP_SIZE,
             "scale_dtype": "BF16",
         },
@@ -687,6 +710,7 @@ def quantize_checkpoint(overwrite: bool = False) -> dict:
             "index": "model.safetensors.index.json",
         },
         "quantization": {
+            "profile": plan.profile.name,
             "format": "symmetric signed INT4",
             "group_size": GROUP_SIZE,
             "group_axis": "final reduction axis after flattening leading dimensions",
@@ -696,12 +720,21 @@ def quantize_checkpoint(overwrite: bool = False) -> dict:
         },
         "policy": {
             "principle": "quantize for fit, not for speed",
+            "profile": plan.as_dict()["profile"],
             "coverage": policy_coverage,
             "classes": plan.as_dict()["classes"],
         },
+        "profile_comparison": {
+            "baseline_profile": DEFAULT_PROFILE_NAME,
+            "selected_profile": plan.profile.name,
+            "default_planned_tensor_storage_bytes": default_plan.planned_bytes,
+            "selected_planned_tensor_storage_bytes": plan.planned_bytes,
+            "selected_minus_default_tensor_storage_bytes": profile_delta_bytes,
+            "authority": "real source safetensors headers",
+        },
         "output": {
             "volume": "kimi-linear-quantized",
-            "path": f"/{MODEL_NAME}-W4A16",
+            "path": f"/{output_directory_name}",
             "planned_tensor_storage_bytes": plan.planned_bytes,
             "actual_tensor_storage_bytes": actual_tensor_storage_bytes,
             "actual_safetensors_file_bytes": output_safetensors_file_bytes,
@@ -765,16 +798,16 @@ def quantize_checkpoint(overwrite: bool = False) -> dict:
 
     backup_dir = None
     if output_exists:
-        backup_dir = f"{OUTPUT_DIR}.previous-{uuid.uuid4().hex}"
-        os.replace(OUTPUT_DIR, backup_dir)
+        backup_dir = f"{output_dir}.previous-{uuid.uuid4().hex}"
+        os.replace(output_dir, backup_dir)
     try:
-        os.replace(staging_dir, OUTPUT_DIR)
+        os.replace(staging_dir, output_dir)
         OUTPUT_VOLUME.commit()
     except Exception:
         if backup_dir is not None:
-            if os.path.exists(OUTPUT_DIR):
-                shutil.rmtree(OUTPUT_DIR)
-            os.replace(backup_dir, OUTPUT_DIR)
+            if os.path.exists(output_dir):
+                shutil.rmtree(output_dir)
+            os.replace(backup_dir, output_dir)
             OUTPUT_VOLUME.commit()
         raise
     if backup_dir is not None:
@@ -784,16 +817,19 @@ def quantize_checkpoint(overwrite: bool = False) -> dict:
     written_shards = [
         {
             "name": shard_name,
-            "bytes": os.path.getsize(os.path.join(OUTPUT_DIR, shard_name)),
+            "bytes": os.path.getsize(os.path.join(output_dir, shard_name)),
         }
         for shard_name in sorted(names_by_shard)
     ]
     summary = {
+        "profile": plan.profile.name,
         "output_volume": "kimi-linear-quantized",
-        "output_path": f"/{MODEL_NAME}-W4A16",
-        "manifest_path": f"/{MODEL_NAME}-W4A16/{MANIFEST_NAME}",
+        "output_path": f"/{output_directory_name}",
+        "manifest_path": f"/{output_directory_name}/{MANIFEST_NAME}",
         "source_tensor_storage_bytes": plan.original_bytes,
+        "default_profile_planned_tensor_storage_bytes": default_plan.planned_bytes,
         "planned_tensor_storage_bytes": plan.planned_bytes,
+        "planned_tensor_storage_delta_from_default_bytes": profile_delta_bytes,
         "actual_tensor_storage_bytes": actual_tensor_storage_bytes,
         "actual_safetensors_file_bytes": output_safetensors_file_bytes,
         "actual_checkpoint_directory_bytes": reloaded_manifest["output"][
@@ -814,6 +850,6 @@ def quantize_checkpoint(overwrite: bool = False) -> dict:
 
 
 @app.local_entrypoint()
-def main(overwrite: bool = False):
-    result = quantize_checkpoint.remote(overwrite=overwrite)
+def main(profile: str = "default", overwrite: bool = False):
+    result = quantize_checkpoint.remote(overwrite=overwrite, profile=profile)
     print(json.dumps(result, indent=2, sort_keys=True))

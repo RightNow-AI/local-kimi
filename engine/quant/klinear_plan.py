@@ -66,6 +66,67 @@ _DENSE_MLP_PROJECTIONS = (
     ".mlp.w3.weight",
 )
 
+DEFAULT_PROFILE_NAME = "default"
+SHARED_EXPERTS_BF16_PROFILE_NAME = "shared-experts-bf16"
+
+_ROUTED_EXPERT_CLASS = "routed expert projections"
+_SHARED_EXPERT_CLASS = "shared expert projections"
+_ATTENTION_CLASS = "attention projections"
+_DENSE_LAYER_0_MLP_CLASS = "dense layer 0 MLP projections"
+
+
+@dataclass(frozen=True)
+class QuantizationProfile:
+    name: str
+    description: str
+    quantized_tensor_classes: frozenset[str]
+
+    def quantizes(self, tensor_class: str) -> bool:
+        return tensor_class in self.quantized_tensor_classes
+
+
+_DEFAULT_QUANTIZED_CLASSES = frozenset(
+    {
+        _ROUTED_EXPERT_CLASS,
+        _SHARED_EXPERT_CLASS,
+        _ATTENTION_CLASS,
+        _DENSE_LAYER_0_MLP_CLASS,
+    }
+)
+
+_PROFILES = {
+    DEFAULT_PROFILE_NAME: QuantizationProfile(
+        name=DEFAULT_PROFILE_NAME,
+        description=(
+            "The measured selective W4A16 policy, unchanged from the original "
+            "Kimi-Linear quantization artifact."
+        ),
+        quantized_tensor_classes=_DEFAULT_QUANTIZED_CLASSES,
+    ),
+    SHARED_EXPERTS_BF16_PROFILE_NAME: QuantizationProfile(
+        name=SHARED_EXPERTS_BF16_PROFILE_NAME,
+        description=(
+            "The selective W4A16 policy with all shared expert projections "
+            "retained in BF16 for a controlled accuracy experiment."
+        ),
+        quantized_tensor_classes=_DEFAULT_QUANTIZED_CLASSES - {_SHARED_EXPERT_CLASS},
+    ),
+}
+
+
+def get_klinear_quantization_profile(profile: str) -> QuantizationProfile:
+    """Resolve a named profile, refusing unknown names rather than falling back."""
+    if not isinstance(profile, str):
+        raise TypeError("quantization profile name must be a string")
+    try:
+        return _PROFILES[profile]
+    except KeyError as exc:
+        supported = ", ".join(sorted(_PROFILES))
+        raise ValueError(
+            f"unknown Kimi-Linear quantization profile {profile!r}; "
+            f"supported profiles: {supported}"
+        ) from exc
+
 
 @dataclass(frozen=True)
 class TensorMetadata:
@@ -132,6 +193,7 @@ class ClassDecision:
 
 @dataclass(frozen=True)
 class KLinearQuantizationPlan:
+    profile: QuantizationProfile
     tensors: tuple[TensorDecision, ...]
 
     @property
@@ -174,6 +236,13 @@ class KLinearQuantizationPlan:
 
     def as_dict(self) -> dict:
         return {
+            "profile": {
+                "name": self.profile.name,
+                "description": self.profile.description,
+                "quantized_tensor_classes": sorted(
+                    self.profile.quantized_tensor_classes
+                ),
+            },
             "format": {
                 "weight_bits": 4,
                 "scale_dtype": "BF16",
@@ -252,6 +321,7 @@ def _classify(
     metadata: TensorMetadata,
     *,
     kda_layers: frozenset[int],
+    profile: QuantizationProfile,
 ) -> tuple[str, bool, str]:
     name = metadata.name
     layer = _layer_index(name)
@@ -296,24 +366,33 @@ def _classify(
             "Keep KDA recurrent controls and short convolutions in source precision.",
         )
     if ".experts." in name or ".routed_expert" in name:
+        tensor_class = _ROUTED_EXPERT_CLASS
         return (
-            "routed expert projections",
-            True,
+            tensor_class,
+            profile.quantizes(tensor_class),
             "Routed experts dominate resident bytes and are the primary fit target.",
         )
     if ".shared_experts." in name or ".shared_expert." in name:
+        tensor_class = _SHARED_EXPERT_CLASS
+        quantize = profile.quantizes(tensor_class)
         return (
-            "shared expert projections",
-            True,
+            tensor_class,
+            quantize,
             (
                 "Shared expert matrices are large token-path projections and must be "
                 "compressed for fit."
+                if quantize
+                else (
+                    "Retain shared expert projections in BF16 for the "
+                    "routing-stability hypothesis test."
+                )
             ),
         )
     if layer == 0 and any(name.endswith(suffix) for suffix in _DENSE_MLP_PROJECTIONS):
+        tensor_class = _DENSE_LAYER_0_MLP_CLASS
         return (
-            "dense layer 0 MLP projections",
-            True,
+            tensor_class,
+            profile.quantizes(tensor_class),
             "The first dense MLP is a large matrix bank and is part of the fit target.",
         )
     if name.endswith("kv_a_proj_with_mqa.weight"):
@@ -332,9 +411,10 @@ def _classify(
         (".self_attn." in name or ".attention." in name)
         and name.endswith("_proj.weight")
     ):
+        tensor_class = _ATTENTION_CLASS
         return (
-            "attention projections",
-            True,
+            tensor_class,
+            profile.quantizes(tensor_class),
             "Quantize large attention projection matrices while preserving KDA controls.",
         )
     if not _is_matrix_weight(metadata):
@@ -352,8 +432,11 @@ def _classify(
 
 def build_klinear_quantization_plan(
     tensors: Iterable[TensorMetadata],
+    *,
+    profile: str = DEFAULT_PROFILE_NAME,
 ) -> KLinearQuantizationPlan:
     """Classify every real checkpoint tensor and compute projected storage."""
+    selected_profile = get_klinear_quantization_profile(profile)
     metadata = tuple(sorted(tensors, key=lambda tensor: tensor.name))
     if not metadata:
         raise ValueError("the checkpoint tensor manifest is empty")
@@ -369,7 +452,11 @@ def build_klinear_quantization_plan(
     )
     decisions = []
     for tensor in metadata:
-        tensor_class, quantize, reason = _classify(tensor, kda_layers=kda_layers)
+        tensor_class, quantize, reason = _classify(
+            tensor,
+            kda_layers=kda_layers,
+            profile=selected_profile,
+        )
         if quantize:
             if tensor.dtype != "BF16":
                 raise TypeError(
@@ -395,4 +482,7 @@ def build_klinear_quantization_plan(
                 planned_bytes=planned,
             )
         )
-    return KLinearQuantizationPlan(tuple(decisions))
+    return KLinearQuantizationPlan(
+        profile=selected_profile,
+        tensors=tuple(decisions),
+    )

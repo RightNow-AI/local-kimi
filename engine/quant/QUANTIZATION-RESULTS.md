@@ -24,6 +24,39 @@ The plan projected 28,803,304,448 bytes and the artifact is 28,803,304,448
 bytes. Planned and actual agree exactly, because both are computed from real
 safetensors header shapes rather than from a bits-per-parameter estimate.
 
+## Quantization profiles
+
+`engine/quant/klinear_plan.py` now exposes two named profiles. `default` is the
+existing measured policy and remains the implicit default. It still quantizes
+20,150 tensors, including all 78 shared-expert projections, and retains 343.
+`shared-experts-bf16` changes only those 78 decisions, retaining every shared
+expert projection in BF16 while continuing to quantize routed experts,
+attention projections, and the layer 0 dense MLP.
+
+A header-only census of all 20 source shards at revision
+`e1df551a447157d4658b573f9a695d57658590e9` reproduced the recorded
+98,245,528,576 source tensor bytes and 20,493 tensors. The 78 shared-expert
+tensors occupy 368,050,176 bytes in BF16 and 103,514,112 bytes in W4A16.
+
+| profile | projected tensor bytes | change from `default` |
+|---|---:|---:|
+| `default` | 28,803,304,448 | 0 |
+| `shared-experts-bf16` | 29,067,840,512 | +264,536,064 |
+
+The exact cost is 264,536,064 bytes, or 264.536 MB in decimal units and
+252.28125 MiB in binary units. The rough 264 MB estimate was right in decimal
+terms. The increase is 0.918423% of the default planned tensor storage.
+
+The second profile exists to test one question: does removing the
+highest-error, every-token tensor class materially raise router set agreement
+and greedy output identity under the same accuracy protocol? It is an
+unmeasured hypothesis, not an improvement claim.
+
+The Modal builder keeps the existing artifact at
+`Kimi-Linear-48B-A3B-Instruct-W4A16` and writes the second profile to
+`Kimi-Linear-48B-A3B-Instruct-W4A16-shared-experts-bf16`, so the two artifacts
+can coexist on the same volume.
+
 For the record, `engine/laptop/RESULTS.md` previously projected 24,561,340,864
 bytes. That figure assumed a flat 4.0 bits per parameter across the whole model.
 It is superseded and is retained there only so the correction is auditable.
@@ -102,10 +135,9 @@ Worst tensors by relative Frobenius error, all shared experts:
 sees roughly 8 of every 256 tokens. The shared expert runs on EVERY token, so
 its error is not diluted by sparsity the way routed-expert error is.
 
-There are 78 shared-expert tensors. Holding them in BF16 instead would cost on
-the order of 264 MB against a 28.8 GB artifact, under one percent, and would
-remove the worst-measured error class from the path every token takes. That is
-exactly the trade the fit-not-speed principle argues for.
+There are 78 shared-expert tensors. The named `shared-experts-bf16` profile
+expresses the exact controlled trade described above without changing the
+default artifact.
 
 This page does NOT claim that change is necessary, because weight-space error is
 not model quality and the two can diverge in both directions. `engine/accuracy`
@@ -117,9 +149,11 @@ the first hypothesis that run should test.
 
 ```bash
 modal run engine/modal_quantize_klinear.py
+modal run engine/modal_quantize_klinear.py --profile shared-experts-bf16
 ```
 
-Reads `kimi-linear-weights`, writes `kimi-linear-quantized`. The job is
-fail-closed: it refuses unclassified matrices, refuses a reduction dimension not
-divisible by the group size rather than padding, and refuses to commit the
-output volume unless every written shard reopens and matches the manifest.
+Reads `kimi-linear-weights`, writes the selected profile under
+`kimi-linear-quantized`. The job is fail-closed: it refuses unknown profiles,
+unclassified matrices, and reduction dimensions not divisible by the group
+size, and it refuses to commit unless every written shard reopens and matches
+the manifest.
