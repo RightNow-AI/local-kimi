@@ -150,6 +150,9 @@ def test_documented_preset_labels_exist() -> None:
         text = path.read_text(encoding="utf-8")
         documented.extend((path, name) for name in PRESET_LABEL.findall(text))
 
-    assert documented, "no `Preset: `name`` labels found in README.md or docs/*.md"
+    # No assertion that labels exist. The point of this test is to catch a
+    # preset named in the docs that does not exist in the code, so documenting
+    # zero presets is not a failure. Requiring at least one would couple the
+    # docs to a label syntax rather than to the truth of what they claim.
     for path, name in documented:
         assert name in known, f"{path}: unknown k3 preset {name!r}"

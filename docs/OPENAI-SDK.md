@@ -1,9 +1,10 @@
 # OpenAI Python SDK
 
-Preset: `openai`
-
-This preset uses OpenAI Chat Completions at `/v1/chat/completions`. The route is
+The `openai` preset uses OpenAI Chat Completions at `/v1/chat/completions`. The route is
 also the fallback for an otherwise unrecognised Chat Completions client.
+
+Complete the [quickstart](QUICKSTART.md) first if the model server is not already
+running.
 
 Start `k3` against the local llama.cpp server:
 

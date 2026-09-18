@@ -1,11 +1,12 @@
 # Claude Code
 
-Preset: `claude-code`
-
-This preset uses the Anthropic Messages dialect and the routes
+The `claude-code` preset uses the Anthropic Messages dialect and the routes
 `/v1/messages`, `/v1/messages/count_tokens`, and `/v1/models`. The preset name,
 environment variables, routes, tool parser, and reasoning policy are defined in
 `k3/presets.py`.
+
+Complete the [quickstart](QUICKSTART.md) first if the model server is not already
+running.
 
 Start `k3` against the local llama.cpp server:
 
@@ -39,5 +40,5 @@ contains a self-contained copy when small enough and a reasoning-ledger id. On
 the next turn, `k3/reasoning.py` restores the original reasoning and, on a ledger
 hit, the complete upstream assistant message.
 
-See [QUICKSTART.md](QUICKSTART.md#reasoning-behavior-with-llamacpp) for the
+See [QUICKSTART.md](QUICKSTART.md#reasoning-behavior) for the
 llama.cpp limitation when the backend provides no distinct reasoning channel.

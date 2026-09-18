@@ -1,9 +1,10 @@
 # Codex
 
-Preset: `codex`
-
-This preset uses the OpenAI Responses dialect at `/v1/responses`. The config
+The `codex` preset uses the OpenAI Responses dialect at `/v1/responses`. The config
 below is generated from the preset body in `k3/presets.py`.
+
+Complete the [quickstart](QUICKSTART.md) first if the model server is not already
+running.
 
 Start `k3` against the local llama.cpp server:
 
@@ -11,7 +12,7 @@ Start `k3` against the local llama.cpp server:
 uv run k3 serve --upstream http://127.0.0.1:8000/v1 --model kimi-linear --reasoning-field inline
 ```
 
-Add this to `~/.codex/config.toml`:
+Add this to the user-level `~/.codex/config.toml`:
 
 ```toml
 model = "kimi-linear"
@@ -23,6 +24,10 @@ base_url = "http://localhost:8080/v1"
 wire_api = "responses"
 env_key = "K3_API_KEY"
 ```
+
+Keep the provider block in the user-level file. Codex does not load custom
+model-provider definitions from a project-local `.codex/config.toml`. See the
+official [Codex configuration reference](https://developers.openai.com/codex/config-reference).
 
 Set the token and launch Codex:
 

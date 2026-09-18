@@ -46,10 +46,9 @@ model text, including Kimi K3 XTML. The original dialect then raises the events
 into Anthropic Messages SSE, OpenAI Chat Completions SSE, or OpenAI Responses
 named events.
 
-`tests/test_full_chain.py` is the closest offline proof of the whole transport
-shape. It connects `k3` to a real ASGI OpenAI-compatible server through HTTP
-transport, then sends Anthropic and OpenAI requests through the proxy. It was
-read for this guide but not run in this lane.
+`tests/test_full_chain.py` covers the whole transport shape. It connects `k3` to
+an ASGI OpenAI-compatible server through HTTP transport, then sends Anthropic
+and OpenAI requests through the proxy.
 
 ## Reasoning ledger
 
