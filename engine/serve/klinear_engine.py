@@ -6,9 +6,10 @@ import asyncio
 import codecs
 import json
 from collections.abc import AsyncIterator, Collection, Mapping, Sequence
-from typing import Any, Literal
+from typing import Any
 
 import torch
+from k3.toolcalls import KimiToolParser, ParsedText, ParsedToolCall, parse_all
 
 from ..klinear.generate import generate_tokens
 from ..klinear.model import KLinearModel
@@ -21,10 +22,44 @@ from .contracts import (
     UsageEvent,
 )
 
-_OPEN = "<|open|>"
-_CLOSE = "<|close|>"
-_SEPARATOR = "<|sep|>"
-_END_OF_MESSAGE = "<|end_of_msg|>"
+_EOS = "[EOS]"
+_END_OF_TURN = "[EOT]"
+_IM_END = "<|im_end|>"
+_IM_USER = "<|im_user|>"
+_IM_ASSISTANT = "<|im_assistant|>"
+_IM_SYSTEM = "<|im_system|>"
+_IM_MIDDLE = "<|im_middle|>"
+_TOOL_SECTION_BEGIN = "<|tool_calls_section_begin|>"
+_TOOL_SECTION_END = "<|tool_calls_section_end|>"
+_TOOL_CALL_BEGIN = "<|tool_call_begin|>"
+_TOOL_ARGUMENT_BEGIN = "<|tool_call_argument_begin|>"
+_TOOL_CALL_END = "<|tool_call_end|>"
+
+_REQUIRED_CONTROL_TOKENS = (
+    _EOS,
+    _END_OF_TURN,
+    _IM_END,
+    _IM_USER,
+    _IM_ASSISTANT,
+    _IM_SYSTEM,
+    _IM_MIDDLE,
+    _TOOL_SECTION_BEGIN,
+    _TOOL_SECTION_END,
+    _TOOL_CALL_BEGIN,
+    _TOOL_ARGUMENT_BEGIN,
+    _TOOL_CALL_END,
+)
+
+
+class _KimiLinearToolParser(KimiToolParser):
+    """Reuse the K2 envelope parser while retaining Kimi-Linear call IDs."""
+
+    def _split_id(self, raw: str) -> tuple[str, str]:
+        normalized = raw.strip()
+        match = self._ID_RE.match(normalized)
+        if match is None:
+            return super()._split_id(raw)
+        return match.group("name") or "unknown", normalized
 
 
 class KimiChatTokenizer:
@@ -32,13 +67,13 @@ class KimiChatTokenizer:
 
     def __init__(self, tokenizer: Any) -> None:
         self.tokenizer = tokenizer
-        self.open_token_id = _special_token_id(tokenizer, _OPEN)
-        self.close_token_id = _special_token_id(tokenizer, _CLOSE)
-        self.separator_token_id = _special_token_id(tokenizer, _SEPARATOR)
-        self.end_of_message_token_id = _special_token_id(
-            tokenizer,
-            _END_OF_MESSAGE,
-        )
+        self.control_token_ids = {
+            token: _special_token_id(tokenizer, token)
+            for token in _REQUIRED_CONTROL_TOKENS
+        }
+        self.im_end_token_id = self.control_token_ids[_IM_END]
+        self.end_of_turn_token_id = self.control_token_ids[_END_OF_TURN]
+        self.eos_token_id = self.control_token_ids[_EOS]
         token_byte_decoder = getattr(
             getattr(tokenizer, "model", None),
             "decode_single_token_bytes",
@@ -51,7 +86,13 @@ class KimiChatTokenizer:
         self._decode_single_token_bytes = token_byte_decoder
 
         eos_ids = _token_id_set(getattr(tokenizer, "eos_token_id", None))
-        eos_ids.add(self.end_of_message_token_id)
+        eos_ids.update(
+            (
+                self.eos_token_id,
+                self.im_end_token_id,
+                self.end_of_turn_token_id,
+            )
+        )
         self._eos_token_ids = frozenset(eos_ids)
 
     @classmethod
@@ -74,14 +115,11 @@ class KimiChatTokenizer:
         kwargs: dict[str, Any] = {
             "tokenize": True,
             "add_generation_prompt": True,
-            "thinking": True,
         }
         if prompt.tools:
             kwargs["tools"] = [dict(tool) for tool in prompt.tools]
         if prompt.tool_choice is not None:
             kwargs["tool_choice"] = prompt.tool_choice
-        if prompt.reasoning_effort is not None:
-            kwargs["thinking_effort"] = _thinking_effort(prompt.reasoning_effort)
 
         token_ids = self.tokenizer.apply_chat_template(messages, **kwargs)
         if isinstance(token_ids, torch.Tensor):
@@ -103,6 +141,32 @@ class KimiChatTokenizer:
     def new_decoder(self) -> "KimiIncrementalDecoder":
         return KimiIncrementalDecoder(self)
 
+    def parse_assistant_output(self, text: str) -> dict[str, Any]:
+        """Convert a Kimi-Linear tool envelope into OpenAI message fields."""
+
+        if not isinstance(text, str):
+            raise TypeError("Moonshot assistant output must be text")
+        content: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
+        for event in parse_all(_KimiLinearToolParser(), text):
+            if isinstance(event, ParsedText):
+                content.append(event.text)
+            elif isinstance(event, ParsedToolCall):
+                tool_calls.append(
+                    {
+                        "id": event.id,
+                        "type": "function",
+                        "function": {
+                            "name": event.name,
+                            "arguments": event.arguments,
+                        },
+                    }
+                )
+        message: dict[str, Any] = {"content": "".join(content) or None}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        return message
+
     def token_bytes(self, token_id: int) -> bytes:
         raw = self._decode_single_token_bytes(token_id)
         if not isinstance(raw, (bytes, bytearray)):
@@ -111,84 +175,32 @@ class KimiChatTokenizer:
 
 
 class KimiIncrementalDecoder:
-    """Decode exact token bytes while treating XTML tags as channel controls."""
+    """Decode Kimi-Linear output as visible content with no reasoning channel."""
 
     def __init__(self, tokenizer: KimiChatTokenizer) -> None:
         self.tokenizer = tokenizer
-        self.channel: Literal["reasoning", "content"] | None = "reasoning"
-        self._control: Literal["open", "close"] | None = None
-        self._control_text: list[str] = []
+        self._finished = False
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     def push(self, token_id: int) -> list[DecodedFragment]:
-        if token_id == self.tokenizer.open_token_id:
-            return self._start_control("open")
-        if token_id == self.tokenizer.close_token_id:
-            return self._start_control("close")
-        if token_id == self.tokenizer.separator_token_id:
+        if token_id in self.tokenizer.eos_token_ids:
             fragments = self._flush_decoder()
-            if self._control is not None:
-                descriptor = "".join(self._control_text).strip()
-                control = self._control
-                self._control = None
-                self._control_text.clear()
-                self._apply_control(control, descriptor)
+            self._finished = True
             return fragments
-        if token_id == self.tokenizer.end_of_message_token_id:
-            fragments = self._flush_decoder()
-            self.channel = None
-            return fragments
+        if self._finished:
+            return []
 
         text = self._decoder.decode(self.tokenizer.token_bytes(token_id), final=False)
-        if not text:
-            return []
-        if self._control is not None:
-            self._control_text.append(text)
-            return []
-        return self._fragment(text)
+        return [DecodedFragment("content", text)] if text else []
 
     def finish(self) -> list[DecodedFragment]:
-        fragments = self._flush_decoder()
-        self._control = None
-        self._control_text.clear()
-        return fragments
-
-    def _start_control(
-        self,
-        control: Literal["open", "close"],
-    ) -> list[DecodedFragment]:
-        fragments = self._flush_decoder()
-        if self._control is not None:
-            raise ValueError("Moonshot output started a nested XTML control tag")
-        self._control = control
-        self._control_text.clear()
-        return fragments
+        self._finished = True
+        return self._flush_decoder()
 
     def _flush_decoder(self) -> list[DecodedFragment]:
         text = self._decoder.decode(b"", final=True)
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
-        if not text:
-            return []
-        if self._control is not None:
-            self._control_text.append(text)
-            return []
-        return self._fragment(text)
-
-    def _fragment(self, text: str) -> list[DecodedFragment]:
-        if self.channel is None or not text:
-            return []
-        return [DecodedFragment(self.channel, text)]
-
-    def _apply_control(self, control: Literal["open", "close"], descriptor: str) -> None:
-        tag = descriptor.split(maxsplit=1)[0] if descriptor else ""
-        if control == "open" and tag == "think":
-            self.channel = "reasoning"
-        elif control == "close" and tag == "think":
-            self.channel = None
-        elif control == "open" and tag == "response":
-            self.channel = "content"
-        elif control == "close" and tag == "response":
-            self.channel = None
+        return [DecodedFragment("content", text)] if text else []
 
 
 class KLinearEngine:
@@ -313,22 +325,6 @@ def _token_id_set(value: Any) -> set[int]:
         }
         return result
     return set()
-
-
-def _thinking_effort(value: str) -> str:
-    normalized = value.strip().lower()
-    mapped = {
-        "minimal": "low",
-        "low": "low",
-        "medium": "high",
-        "high": "high",
-        "max": "max",
-    }.get(normalized)
-    if mapped is None:
-        raise ValueError(
-            "reasoning_effort must be one of minimal, low, medium, high, or max"
-        )
-    return mapped
 
 
 __all__ = ["KimiChatTokenizer", "KimiIncrementalDecoder", "KLinearEngine"]
