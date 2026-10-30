@@ -88,6 +88,25 @@ def _blocks(content: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _describe_binary_block(block: dict[str, Any]) -> Optional[str]:
+    """A one-line stand-in for a block that carries a base64 payload.
+
+    Claude Code's Read tool returns screenshots and image files as ``image``
+    blocks inside ``tool_result``, and MCP tools do the same. Serialising the
+    block verbatim puts the whole base64 string into the prompt as text: a
+    model cannot read it, it tokenises at roughly a token per three bytes, and
+    one screenshot is enough to overflow the engine's context. Keep what the
+    model can use, the kind of block and its media type, and drop the bytes.
+    """
+    source = block.get("source")
+    if not isinstance(source, dict) or source.get("type") != "base64":
+        return None
+    kind = str(block.get("type") or "binary")
+    media_type = str(source.get("media_type") or "application/octet-stream")
+    size = len(str(source.get("data") or ""))
+    return f"[{kind} {media_type}, {size} base64 bytes omitted]"
+
+
 def _stringify_tool_result(content: Any) -> str:
     if content is None:
         return ""
@@ -102,8 +121,11 @@ def _stringify_tool_result(content: Any) -> str:
                 chunks.append(str(block.get("text") or ""))
             else:
                 # Images and other rich results have no representation in an
-                # OpenAI tool message; describe them rather than drop them.
-                chunks.append(json.dumps(block, ensure_ascii=False))
+                # OpenAI tool message; describe them rather than drop them,
+                # but never inline a base64 payload as prompt text.
+                chunks.append(
+                    _describe_binary_block(block) or json.dumps(block, ensure_ascii=False)
+                )
         return "\n".join(c for c in chunks if c)
     return json.dumps(content, ensure_ascii=False)
 
