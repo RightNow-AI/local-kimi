@@ -6,6 +6,15 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- An `image` block inside a Claude Code `tool_result` was serialised into the
+  tool message verbatim, base64 payload included, so one screenshot from the
+  Read tool or an MCP tool put hundreds of kilobytes of unreadable text into
+  the prompt and could overflow the engine's context on its own. Blocks that
+  carry a base64 payload now become a one-line description with the block
+  type, media type and payload size.
+
 ## [0.2.0] - 2026-07-29
 
 Decode throughput for Kimi-Linear-48B-A3B on one NVIDIA L40S under a hard 32 GiB

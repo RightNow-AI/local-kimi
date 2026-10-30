@@ -172,6 +172,63 @@ def test_tool_result_content_list_is_flattened_and_is_error_survives() -> None:
     assert result.is_error is True
 
 
+def test_tool_result_image_block_does_not_inline_its_base64_payload() -> None:
+    # Claude Code's Read tool returns image files this way, and any MCP
+    # screenshot tool does too. The payload is useless to the model as text
+    # and large enough to overflow the engine's context on its own.
+    payload = "QUJD" * 50_000
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": [
+                            {"type": "text", "text": "screenshot taken"},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": payload,
+                                },
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    req = ant.ingress(body, make_ctx())
+
+    content = req.messages[0].tool_results()[0].content
+    assert payload not in content
+    assert "QUJDQUJD" not in content
+    assert len(content) < 200
+    assert content.startswith("screenshot taken\n")
+    assert "image/png" in content
+    assert str(len(payload)) in content
+
+    # count_tokens runs on the same ingress, so the estimate shrinks with it.
+    assert ant.count_tokens(body, make_ctx())["input_tokens"] < 100
+
+
+def test_tool_result_rich_blocks_without_a_payload_are_still_described() -> None:
+    block = {"type": "search_result", "title": "Weather", "source": "https://example.test"}
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": [block]}],
+            }
+        ]
+    }
+    req = ant.ingress(body, make_ctx())
+    assert req.messages[0].tool_results()[0].content == json.dumps(block, ensure_ascii=False)
+
+
 # --------------------------------------------------------------------------
 # 4/5. assistant reasoning + tool calls
 # --------------------------------------------------------------------------
