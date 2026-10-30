@@ -183,6 +183,32 @@ def _effort_from_budget(budget: Optional[int]) -> Optional[str]:
     return "high"
 
 
+#: ``output_config.effort`` levels, folded onto the ladder the budget mapping
+#: already produces. ``xhigh`` and ``max`` have no engine-side counterpart, so
+#: they land on ``high`` rather than being dropped for the preset default.
+_EFFORT_LEVELS = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+    "max": "high",
+}
+
+
+def _effort_from_output_config(output_config: Any) -> Optional[str]:
+    """Claude Code's ``/effort`` setting travels as ``output_config.effort``.
+
+    With adaptive thinking there is no ``budget_tokens`` at all, so this is the
+    only effort signal the client sends; it has to win over the budget mapping.
+    """
+    if not isinstance(output_config, dict):
+        return None
+    effort = output_config.get("effort")
+    if not isinstance(effort, str):
+        return None
+    return _EFFORT_LEVELS.get(effort.strip().lower())
+
+
 def ingress(body: dict[str, Any], ctx: DialectContext) -> CanonicalRequest:
     body = body or {}
     defaults = ctx.preset.defaults
@@ -283,6 +309,7 @@ def ingress(body: dict[str, Any], ctx: DialectContext) -> CanonicalRequest:
 
     req.stream = bool(body.get("stream"))
 
+    effort = _effort_from_output_config(body.get("output_config"))
     thinking = body.get("thinking")
     if isinstance(thinking, dict):
         # Only "disabled" is a refusal. Claude Code also sends "adaptive", and
@@ -291,9 +318,8 @@ def ingress(body: dict[str, Any], ctx: DialectContext) -> CanonicalRequest:
         req.thinking_enabled = thinking.get("type") != "disabled"
         budget = thinking.get("budget_tokens")
         req.thinking_budget = int(budget) if isinstance(budget, (int, float)) else None
-        req.reasoning_effort = _effort_from_budget(req.thinking_budget) or defaults.reasoning_effort
-    else:
-        req.reasoning_effort = defaults.reasoning_effort
+        effort = effort or _effort_from_budget(req.thinking_budget)
+    req.reasoning_effort = effort or defaults.reasoning_effort
 
     if defaults.parallel_tool_calls is not None:
         req.parallel_tool_calls = defaults.parallel_tool_calls

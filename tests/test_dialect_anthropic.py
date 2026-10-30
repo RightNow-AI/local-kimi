@@ -368,6 +368,37 @@ def test_thinking_budget_is_recorded_and_thinking_enabled_is_flagged() -> None:
     assert req.thinking_enabled is True
 
 
+def test_output_config_effort_maps_onto_the_engine_ladder() -> None:
+    # Claude Code's /effort setting travels as output_config.effort, and with
+    # adaptive thinking it is the only effort signal in the request. The two
+    # levels above "high" have no engine counterpart and fold onto it.
+    expected = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
+    for level, mapped in expected.items():
+        body = {"thinking": {"type": "adaptive"}, "output_config": {"effort": level}}
+        assert ant.ingress(body, make_ctx()).reasoning_effort == mapped, level
+
+
+def test_output_config_effort_wins_over_the_thinking_budget() -> None:
+    body = {
+        "thinking": {"type": "enabled", "budget_tokens": 4096},  # budget alone -> low
+        "output_config": {"effort": "high"},
+    }
+    assert ant.ingress(body, make_ctx()).reasoning_effort == "high"
+
+
+def test_output_config_effort_applies_without_a_thinking_block() -> None:
+    assert ant.ingress({"output_config": {"effort": "low"}}, make_ctx()).reasoning_effort == "low"
+
+
+def test_unknown_or_malformed_output_config_falls_back() -> None:
+    default = presets_mod.get("claude-code").defaults.reasoning_effort
+    for output_config in ({"effort": "very_low"}, {"effort": 3}, {}, "high", None):
+        body = {"thinking": {"type": "adaptive"}, "output_config": output_config}
+        assert ant.ingress(body, make_ctx()).reasoning_effort == default, output_config
+    body = {"thinking": {"type": "enabled", "budget_tokens": 32000}, "output_config": {"effort": "?"}}
+    assert ant.ingress(body, make_ctx()).reasoning_effort == "high"
+
+
 # --------------------------------------------------------------------------
 # 9/10. stop sequences and the empty body
 # --------------------------------------------------------------------------

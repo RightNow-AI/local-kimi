@@ -6,6 +6,15 @@ The format follows Keep a Changelog, and the project uses Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Claude Code preset ignored `output_config.effort`, so the `/effort`
+  setting never reached the engine and every request went out at the preset
+  default. The recorded `claude-code-turn1-tools-stream` cassette shows
+  `xhigh` arriving and `medium` leaving. Effort now maps onto the same ladder
+  the thinking-budget mapping uses, and wins over the budget when both are
+  present.
+
 ## [0.2.0] - 2026-07-29
 
 Decode throughput for Kimi-Linear-48B-A3B on one NVIDIA L40S under a hard 32 GiB
